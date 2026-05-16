@@ -24,22 +24,27 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
+  // Use CORS and JSON parsing
   app.use(cors());
   app.use(express.json());
 
-  // Use a Router for API to be more organized and prevent conflicts with Vite
-  const apiRouter = express.Router();
-
-  apiRouter.get('/health', (req, res) => {
-    res.json({ ok: true, timestamp: new Date().toISOString() });
+  // Log all requests for debugging
+  app.use((req, res, next) => {
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+    next();
   });
 
-  apiRouter.post('/analyze-xml', upload.array('files'), (req: Request, res: Response) => {
-    console.log('[API] analyze-xml hit', { count: (req as any).files?.length });
+  // API Routes - Mounted directly for maximum compatibility
+  app.get('/api/health', (req, res) => {
+    res.json({ ok: true, env: process.env.NODE_ENV, timestamp: new Date().toISOString() });
+  });
+
+  app.post('/api/analyze-xml', upload.array('files'), (req: Request, res: Response) => {
+    console.log('[API] analyze-xml hit');
     try {
       const files = (req as MulterRequest).files as Express.Multer.File[];
       if (!files || files.length === 0) {
-        return res.status(400).json({ error: 'No files uploaded' });
+        return res.status(400).json({ error: 'No se subieron archivos' });
       }
 
       const results = files.map(file => {
@@ -66,20 +71,17 @@ async function startServer() {
     }
   });
 
-  apiRouter.post('/analyze-bank-statement', upload.single('file'), async (req: Request, res: Response) => {
-    console.log('[API] analyze-bank-statement hit', { 
-      file: req.file?.originalname,
-      size: req.file?.size,
-      mime: req.file?.mimetype 
-    });
-
+  app.post('/api/analyze-bank-statement', upload.single('file'), async (req: Request, res: Response) => {
+    console.log('[API] analyze-bank-statement hit');
     try {
       if (!req.file) {
         return res.status(400).json({ error: 'No se subió ningún archivo' });
       }
 
       const file = req.file;
-      if (file.mimetype !== 'application/pdf' && !file.originalname.toLowerCase().endsWith('.pdf')) {
+      const isPdf = file.mimetype === 'application/pdf' || file.originalname.toLowerCase().endsWith('.pdf');
+      
+      if (!isPdf) {
         return res.status(400).json({ error: 'El archivo debe ser un PDF' });
       }
 
@@ -93,27 +95,14 @@ async function startServer() {
       console.error("[API] analyze-bank-statement error:", error);
       res.status(500).json({ 
         error: error.message || 'Error interno al procesar el PDF',
-        stack: process.env.NODE_ENV !== 'production' ? error.stack : undefined
+        details: process.env.NODE_ENV !== 'production' ? error.stack : undefined
       });
     }
   });
 
-  // Mount API router
-  app.use('/api', apiRouter);
-
-  // API 404 Handler - MUST be after apiRouter mounting
-  app.use('/api/*', (req, res) => {
-    console.warn(`[API] 404: ${req.method} ${req.originalUrl}`);
-    res.status(404).json({ 
-      error: 'Ruta de API no encontrada', 
-      method: req.method, 
-      path: req.originalUrl 
-    });
-  });
-
   // Global Error Handler
   app.use((err: any, req: Request, res: Response, next: any) => {
-    console.error('SERVER ERROR:', err);
+    console.error('SERVER FATAL ERROR:', err);
     if (!res.headersSent) {
       res.status(500).json({ error: 'Error interno del servidor', message: err.message });
     }
@@ -127,9 +116,17 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
+    // In production, serve from dist using absolute path
+    const distPath = path.resolve(process.cwd(), 'dist');
+    console.log('Serving static files from:', distPath);
     app.use(express.static(distPath));
+    
+    // Everything else serves index.html (SPA fallback)
     app.get('*', (req, res) => {
+      // Check if it's an API route that missed (to return JSON 404 instead of HTML)
+      if (req.url.startsWith('/api/')) {
+        return res.status(404).json({ error: 'API endpoint not found', path: req.url });
+      }
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
