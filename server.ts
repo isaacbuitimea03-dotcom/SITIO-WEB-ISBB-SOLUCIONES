@@ -26,13 +26,15 @@ async function startServer() {
   app.use(cors());
   app.use(express.json());
 
-  // API Routes
-  app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  // Use a Router for API to be more organized and prevent conflicts with Vite
+  const apiRouter = express.Router();
+
+  apiRouter.get('/health', (req, res) => {
+    res.json({ ok: true, timestamp: new Date().toISOString() });
   });
 
-  app.post('/api/analyze-xml', upload.array('files'), (req: Request, res: Response) => {
-    console.log('API HIT: /api/analyze-xml', { filesCount: (req as any).files?.length });
+  apiRouter.post('/analyze-xml', upload.array('files'), (req: Request, res: Response) => {
+    console.log('[API] analyze-xml hit', { count: (req as any).files?.length });
     try {
       const files = (req as MulterRequest).files as Express.Multer.File[];
       if (!files || files.length === 0) {
@@ -58,48 +60,54 @@ async function startServer() {
 
       res.json(results);
     } catch (error: any) {
+      console.error('[API] analyze-xml error:', error);
       res.status(500).json({ error: error.message });
     }
   });
 
-  app.post('/api/analyze-bank-statement', upload.single('file'), async (req: Request, res: Response) => {
-    console.log('--- BANK STATEMENT API HIT ---');
-    console.log('File details:', { 
-      exists: !!req.file,
-      originalname: req.file?.originalname,
+  apiRouter.post('/analyze-bank-statement', upload.single('file'), async (req: Request, res: Response) => {
+    console.log('[API] analyze-bank-statement hit', { 
+      file: req.file?.originalname,
       size: req.file?.size,
-      mimetype: req.file?.mimetype 
+      mime: req.file?.mimetype 
     });
 
     try {
-      const file = req.file;
-      if (!file) {
-        console.error('No file found in request');
+      if (!req.file) {
         return res.status(400).json({ error: 'No se subió ningún archivo' });
       }
 
+      const file = req.file;
       if (file.mimetype !== 'application/pdf' && !file.originalname.toLowerCase().endsWith('.pdf')) {
-        console.error('Invalid file type:', file.mimetype);
         return res.status(400).json({ error: 'El archivo debe ser un PDF' });
       }
 
-      console.log('Invoking extractTransactionsFromPDF...');
-      // Analyze with Gemini using native PDF support
       const transactions = await extractTransactionsFromPDF(file.buffer);
-      console.log('Extraction success, transactions count:', transactions.length);
-
       res.json({
         filename: file.originalname,
         transactions,
         status: 'success'
       });
     } catch (error: any) {
-      console.error("PDF Analysis Endpoint Error:", error);
+      console.error("[API] analyze-bank-statement error:", error);
       res.status(500).json({ 
         error: error.message || 'Error interno al procesar el PDF',
-        details: error.stack 
+        stack: process.env.NODE_ENV !== 'production' ? error.stack : undefined
       });
     }
+  });
+
+  // Mount API router
+  app.use('/api', apiRouter);
+
+  // API 404 Handler - MUST be after apiRouter mounting
+  app.use('/api/*', (req, res) => {
+    console.warn(`[API] 404: ${req.method} ${req.originalUrl}`);
+    res.status(404).json({ 
+      error: 'Ruta de API no encontrada', 
+      method: req.method, 
+      path: req.originalUrl 
+    });
   });
 
   // Global Error Handler

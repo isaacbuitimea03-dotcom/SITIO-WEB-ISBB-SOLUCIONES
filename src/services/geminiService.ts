@@ -52,21 +52,18 @@ export async function extractTransactionsFromPDF(buffer: Buffer): Promise<BankTr
 
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-flash-latest",
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            {
-              inlineData: {
-                data: buffer.toString('base64'),
-                mimeType: 'application/pdf'
-              }
-            },
-            { text: prompt }
-          ]
-        }
-      ],
+      model: "gemini-3-flash-preview",
+      contents: {
+        parts: [
+          {
+            inlineData: {
+              data: buffer.toString('base64'),
+              mimeType: 'application/pdf'
+            }
+          },
+          { text: prompt }
+        ]
+      },
       config: {
         responseMimeType: "application/json",
         responseSchema: {
@@ -98,8 +95,7 @@ export async function extractTransactionsFromPDF(buffer: Buffer): Promise<BankTr
     return data;
   } catch (error: any) {
     console.error("Gemini PDF Service Error:", error);
-    // Extra details for debugging
-    const errorMessage = error.response?.statusText || error.message || "Error desconocido";
+    const errorMessage = error.message || "Error desconocido en el servicio de IA";
     throw new Error(`Error en el análisis de IA: ${errorMessage}`);
   }
 }
