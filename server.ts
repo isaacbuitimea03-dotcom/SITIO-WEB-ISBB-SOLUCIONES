@@ -8,6 +8,7 @@ import cors from 'cors';
 
 console.log('--- SERVER INITIATING ---');
 console.log('Current working directory:', process.cwd());
+console.log('GEMINI_API_KEY present:', !!process.env.GEMINI_API_KEY);
 
 const upload = multer({ 
   storage: multer.memoryStorage(),

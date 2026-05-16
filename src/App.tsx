@@ -360,9 +360,11 @@ export default function App() {
                     className="hidden" 
                   />
                   {loading && activeTool === 'pdf' && (
-                    <div className="absolute inset-0 bg-white/60 backdrop-blur-sm z-20 flex flex-col items-center justify-center">
-                      <div className="w-8 h-8 border-4 border-blue-600/20 border-t-blue-600 rounded-full animate-spin mb-3" />
-                      <p className="text-[10px] font-black uppercase tracking-widest text-blue-700">Analizando con AI...</p>
+                    <div className="absolute inset-0 bg-white/80 backdrop-blur-sm z-20 flex flex-col items-center justify-center p-6">
+                      <div className="w-10 h-10 border-4 border-blue-600/20 border-t-blue-600 rounded-full animate-spin mb-4" />
+                      <p className="text-xs font-black uppercase tracking-widest text-blue-700">Analizando con Inteligencia Artificial</p>
+                      <p className="text-[10px] text-blue-500 mt-2 font-medium text-center">Este proceso es exhaustivo y puede tardar entre 30 y 60 segundos dependiendo del tamaño del PDF.</p>
+                      <p className="text-[10px] text-blue-400 mt-1 uppercase tracking-tighter">Por favor no cierres la ventana</p>
                     </div>
                   )}
                 </div>
