@@ -1,0 +1,49 @@
+@import "tailwindcss";
+
+@theme {
+  --color-gold-50: #fffbeb;
+  --color-gold-100: #fef3c7;
+  --color-gold-200: #fde68a;
+  --color-gold-300: #fcd34d;
+  --color-gold-400: #fbbf24;
+  --color-gold-500: #f59e0b;
+  --color-gold-600: #d97706;
+  --color-gold-700: #b45309;
+  --color-gold-800: #92400e;
+  --color-gold-900: #78350f;
+  --color-wheat: #F5DEB3;
+  --color-wheat-dark: #DEB887;
+  --color-gold-shiny: #D4AF37;
+}
+
+@layer base {
+  body {
+    @apply bg-slate-50;
+  }
+}
+
+.bg-gold-gradient {
+  background: linear-gradient(135deg, #111827 0%, #374151 50%, #F5DEB3 100%);
+}
+
+.text-gold {
+  color: #F5DEB3;
+}
+
+.border-gold {
+  border-color: #F5DEB3;
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 10px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
