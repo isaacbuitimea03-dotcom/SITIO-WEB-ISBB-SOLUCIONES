@@ -3,7 +3,7 @@ import path from 'path';
 import multer from 'multer';
 import { createServer as createViteServer } from 'vite';
 import { parseCFDI } from './src/lib/xmlParser.ts';
-import { extractTransactionsFromText } from './src/services/geminiService.ts';
+import { extractTransactionsFromPDF } from './src/services/geminiService.ts';
 import cors from 'cors';
 
 console.log('--- SERVER INITIATING ---');
@@ -63,40 +63,30 @@ async function startServer() {
   });
 
   app.post('/api/analyze-bank-statement', upload.single('file'), async (req: Request, res: Response) => {
-    console.log('API HIT: /api/analyze-bank-statement', { 
-      hasFile: !!req.file, 
-      filename: req.file?.originalname,
+    console.log('--- BANK STATEMENT API HIT ---');
+    console.log('File details:', { 
+      exists: !!req.file,
+      originalname: req.file?.originalname,
+      size: req.file?.size,
       mimetype: req.file?.mimetype 
     });
+
     try {
       const file = req.file;
       if (!file) {
+        console.error('No file found in request');
         return res.status(400).json({ error: 'No se subió ningún archivo' });
       }
 
-      if (file.mimetype !== 'application/pdf') {
+      if (file.mimetype !== 'application/pdf' && !file.originalname.toLowerCase().endsWith('.pdf')) {
+        console.error('Invalid file type:', file.mimetype);
         return res.status(400).json({ error: 'El archivo debe ser un PDF' });
       }
 
-      // Extract text from PDF - Use careful import for CJS module in ESM
-      let pdf;
-      try {
-        const pdfParseModule = await import('pdf-parse');
-        pdf = pdfParseModule.default || pdfParseModule;
-      } catch (e) {
-        console.error("Failed to load pdf-parse:", e);
-        throw new Error("Error técnico: No se pudo cargar el procesador de PDF.");
-      }
-
-      const data = await pdf(file.buffer);
-      const textContent = data.text;
-
-      if (!textContent || textContent.trim().length === 0) {
-        throw new Error('No se pudo extraer texto del PDF. Asegúrese de que no sea una imagen escaneada sin OCR.');
-      }
-
-      // Analyze with Gemini
-      const transactions = await extractTransactionsFromText(textContent);
+      console.log('Invoking extractTransactionsFromPDF...');
+      // Analyze with Gemini using native PDF support
+      const transactions = await extractTransactionsFromPDF(file.buffer);
+      console.log('Extraction success, transactions count:', transactions.length);
 
       res.json({
         filename: file.originalname,
@@ -104,8 +94,11 @@ async function startServer() {
         status: 'success'
       });
     } catch (error: any) {
-      console.error("PDF Analysis Error:", error);
-      res.status(500).json({ error: error.message || 'Error interno al procesar el PDF' });
+      console.error("PDF Analysis Endpoint Error:", error);
+      res.status(500).json({ 
+        error: error.message || 'Error interno al procesar el PDF',
+        details: error.stack 
+      });
     }
   });
 

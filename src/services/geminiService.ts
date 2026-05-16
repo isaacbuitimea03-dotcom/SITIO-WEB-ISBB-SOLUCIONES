@@ -28,28 +28,45 @@ export interface BankTransaction {
   referencia?: string;
 }
 
-export async function extractTransactionsFromText(text: string): Promise<BankTransaction[]> {
+export async function extractTransactionsFromPDF(buffer: Buffer): Promise<BankTransaction[]> {
+  console.log('Gemini Service: Starting extraction from PDF buffer. Size:', buffer.length);
   const ai = getGenAI();
   
   const prompt = `
-    Analiza el siguiente texto extraído de un estado de cuenta bancario y extrae todos los movimientos o transacciones en una lista estructurada.
+    Analiza este estado de cuenta bancario y extrae TODOS los movimientos o transacciones en una lista estructurada (JSON).
+    Busca en todas las páginas del documento.
+    
     Cada transacción debe tener:
-    - fecha: La fecha de la operación (formato YYYY-MM-DD si es posible inferir el año, o DD/MM).
-    - descripcion: Concepto o descripción del movimiento.
-    - monto: El valor numérico absoluto del importe.
-    - tipo: 'Cargo' (si es un retiro/gasto) o 'Abono' (si es un depósito/pago).
-    - referencia: Cualquier número de referencia o autorización (opcional).
+    - fecha: La fecha de la operación en formato DD/MM/YYYY.
+    - descripcion: Concepto detallado del movimiento.
+    - monto: El valor numérico del importe (positivo siempre).
+    - tipo: Debe ser 'Cargo' para retiros/pagos/gastos, o 'Abono' para depósitos/pagos recibidos.
+    - referencia: Número de referencia o autorización (si existe).
 
-    Texto del estado de cuenta:
-    ${text.substring(0, 30000)}
-
-    IMPORTANTE: Solo devuelve el JSON siguiendo estrictamente el esquema proporcionado.
+    REGLAS CRÍTICAS:
+    1. No omitas ningún movimiento.
+    2. Identifica correctamente la columna de Cargos (Retiros) y Abonos (Depósitos).
+    3. Si el documento tiene varias secciones (ej. compras, pagos de tarjeta, transferencias), inclúyelas todas.
+    4. Responde ÚNICAMENTE con el JSON solicitado.
   `;
 
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
-      contents: prompt,
+      model: "gemini-flash-latest",
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              inlineData: {
+                data: buffer.toString('base64'),
+                mimeType: 'application/pdf'
+              }
+            },
+            { text: prompt }
+          ]
+        }
+      ],
       config: {
         responseMimeType: "application/json",
         responseSchema: {
@@ -60,7 +77,7 @@ export async function extractTransactionsFromText(text: string): Promise<BankTra
               fecha: { type: Type.STRING },
               descripcion: { type: Type.STRING },
               monto: { type: Type.NUMBER },
-              tipo: { type: Type.STRING, enum: ['Cargo', 'Abono'] },
+              tipo: { type: Type.STRING, description: "Debe ser 'Cargo' o 'Abono'" },
               referencia: { type: Type.STRING },
             },
             required: ['fecha', 'descripcion', 'monto', 'tipo'],
@@ -69,9 +86,20 @@ export async function extractTransactionsFromText(text: string): Promise<BankTra
       },
     });
 
-    return JSON.parse(response.text || '[]');
+    const text = response.text;
+    if (!text) {
+      console.warn('Gemini Service: Empty response text');
+      throw new Error("Gemini no devolvió ninguna respuesta válida.");
+    }
+
+    console.log('Gemini Service: Successfully received text response');
+    const data = JSON.parse(text);
+    console.log('Gemini Service: Successfully parsed JSON. Items:', data.length);
+    return data;
   } catch (error: any) {
-    console.error("Gemini Error:", error);
-    throw new Error(`Error al procesar el estado de cuenta con IA: ${error.message}`);
+    console.error("Gemini PDF Service Error:", error);
+    // Extra details for debugging
+    const errorMessage = error.response?.statusText || error.message || "Error desconocido";
+    throw new Error(`Error en el análisis de IA: ${errorMessage}`);
   }
 }
