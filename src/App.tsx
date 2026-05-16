@@ -95,17 +95,19 @@ export default function App() {
     const file = e.target.files?.[0];
     if (!file) return;
     
-    console.log('Starting bank analysis for:', file.name);
+    const apiUrl = '/api/analyze-bank-statement';
+    console.log('Initiating bank analysis call to:', apiUrl);
     setLoading(true);
     const formData = new FormData();
     formData.append('file', file);
 
     try {
-      const response = await fetch('/api/analyze-bank-statement', {
+      const response = await fetch(apiUrl, {
         method: 'POST',
         body: formData,
       });
 
+      console.log('Received response from API:', response.status);
       const contentType = response.headers.get('content-type');
       if (!response.ok) {
         let errorMessage = `Error del servidor (${response.status}) al procesar PDF`;
@@ -119,7 +121,9 @@ export default function App() {
             const text = await response.text();
             console.error('Server returned non-json error:', text.substring(0, 500));
             if (response.status === 404) {
-              errorMessage = "La ruta de análisis de API no fue encontrada (Error 404). Por favor, asegúrate de que la aplicación esté completamente desplegada y que el servidor se haya reiniciado.";
+              errorMessage = `La ruta de análisis (404) no fue encontrada. Servidor respondió: ${text.substring(0, 100)}`;
+            } else {
+              errorMessage = `Error ${response.status}: ${text.substring(0, 100)}`;
             }
           }
         } catch (e) {

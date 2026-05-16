@@ -2,9 +2,10 @@ import express, { Request, Response } from 'express';
 import path from 'path';
 import multer from 'multer';
 import { createServer as createViteServer } from 'vite';
-import { parseCFDI } from './src/lib/xmlParser.ts';
-import { extractTransactionsFromPDF } from './src/services/geminiService.ts';
+import { parseCFDI } from './src/lib/xmlParser';
+import { extractTransactionsFromPDF } from './src/services/geminiService';
 import cors from 'cors';
+import { GoogleGenAI } from '@google/genai';
 
 console.log('--- SERVER INITIATING ---');
 console.log('Current working directory:', process.cwd());
@@ -40,14 +41,15 @@ async function startServer() {
   app.get('/api/health', (req, res) => {
     res.status(200).json({ 
       status: 'ok', 
-      env: process.env.NODE_ENV, 
+      deployment: 'isbb-v2',
       time: new Date().toISOString() 
     });
   });
 
-  // Mount API paths directly for stability
+  // API Routes - Defined at the top level of the app for maximum priority
   app.post('/api/analyze-xml', upload.array('files'), (req: Request, res: Response) => {
-    console.log('[API] analyze-xml started');
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] [API] analyze-xml start`);
     try {
       const files = (req as MulterRequest).files as Express.Multer.File[];
       if (!files || files.length === 0) {
@@ -78,19 +80,20 @@ async function startServer() {
     }
   });
 
-  app.post('/api/analyze-bank-statement', upload.single('file'), async (req: Request, res: Response) => {
-    console.log('[API] analyze-bank-statement execution start');
+  app.post(['/api/analyze-bank-statement', '/api/analyze-bank-statement/'], upload.single('file'), async (req: Request, res: Response) => {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] [API] analyze-bank-statement start`);
     try {
       if (!req.file) {
-        console.warn('[API] No file in request');
+        console.warn('[API] No file provided');
         return res.status(400).json({ error: 'No se subió ningún archivo' });
       }
 
       const file = req.file;
-      console.log(`[API] Processing file: ${file.originalname} (${file.size} bytes)`);
+      console.log(`[API] Processing: ${file.originalname} (${file.size} bytes)`);
       
       const transactions = await extractTransactionsFromPDF(file.buffer);
-      console.log(`[API] Success - extracted ${transactions.length} transactions`);
+      console.log(`[API] Extracted ${transactions.length} transactions`);
 
       res.json({
         filename: file.originalname,
@@ -98,20 +101,20 @@ async function startServer() {
         status: 'success'
       });
     } catch (error: any) {
-      console.error("[API] analyze-bank-statement error:", error);
+      console.error("[API] Error in analyze-bank-statement:", error);
       res.status(500).json({ 
-        error: error.message || 'Error interno al procesar el PDF',
-        details: process.env.NODE_ENV !== 'production' ? error.stack : undefined
+        error: error.message || 'Error interno del servidor al procesar el PDF',
+        stack: process.env.NODE_ENV !== 'production' ? error.stack : undefined
       });
     }
   });
 
-  // Health check
+  // Health check - accessible and fast
   app.get('/api/health', (req, res) => {
-    res.status(200).json({ status: 'ok', node_env: process.env.NODE_ENV });
+    res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
   });
 
-  // Catch-all for any other /api route to return JSON 404
+  // Catch-all for other /api routes
   app.all('/api/*', (req, res) => {
     console.warn(`[API 404] ${req.method} ${req.url}`);
     res.status(404).json({ 
