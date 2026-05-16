@@ -45,10 +45,8 @@ async function startServer() {
     });
   });
 
-  // API Router for better isolation
-  const apiRouter = express.Router();
-
-  apiRouter.post('/analyze-xml', upload.array('files'), (req: Request, res: Response) => {
+  // Mount API paths directly for stability
+  app.post('/api/analyze-xml', upload.array('files'), (req: Request, res: Response) => {
     console.log('[API] analyze-xml started');
     try {
       const files = (req as MulterRequest).files as Express.Multer.File[];
@@ -80,8 +78,8 @@ async function startServer() {
     }
   });
 
-  apiRouter.post('/analyze-bank-statement', upload.single('file'), async (req: Request, res: Response) => {
-    console.log('[API] analyze-bank-statement execution');
+  app.post('/api/analyze-bank-statement', upload.single('file'), async (req: Request, res: Response) => {
+    console.log('[API] analyze-bank-statement execution start');
     try {
       if (!req.file) {
         console.warn('[API] No file in request');
@@ -89,8 +87,10 @@ async function startServer() {
       }
 
       const file = req.file;
+      console.log(`[API] Processing file: ${file.originalname} (${file.size} bytes)`);
+      
       const transactions = await extractTransactionsFromPDF(file.buffer);
-      console.log(`[API] Success - transactions: ${transactions.length}`);
+      console.log(`[API] Success - extracted ${transactions.length} transactions`);
 
       res.json({
         filename: file.originalname,
@@ -98,7 +98,7 @@ async function startServer() {
         status: 'success'
       });
     } catch (error: any) {
-      console.error("[API] analyze-bank-statement logic error:", error);
+      console.error("[API] analyze-bank-statement error:", error);
       res.status(500).json({ 
         error: error.message || 'Error interno al procesar el PDF',
         details: process.env.NODE_ENV !== 'production' ? error.stack : undefined
@@ -106,16 +106,18 @@ async function startServer() {
     }
   });
 
-  // Mount API router
-  app.use('/api', apiRouter);
+  // Health check
+  app.get('/api/health', (req, res) => {
+    res.status(200).json({ status: 'ok', node_env: process.env.NODE_ENV });
+  });
 
-  // Catch-all for other /api routes
+  // Catch-all for any other /api route to return JSON 404
   app.all('/api/*', (req, res) => {
     console.warn(`[API 404] ${req.method} ${req.url}`);
     res.status(404).json({ 
-      error: 'Ruta de API no encontrada o método no soportado',
-      path: req.originalUrl,
-      method: req.method
+      error: 'Endpoint de API no encontrado', 
+      method: req.method, 
+      url: req.url 
     });
   });
 
@@ -144,7 +146,15 @@ async function startServer() {
     
     // Everything else serves index.html (SPA fallback)
     app.get('*', (req, res) => {
-      // API routes should have been caught by apiRouter or the /api/* catch-all
+      // If it's an API route that missed, return JSON 404
+      if (req.url.startsWith('/api/')) {
+        console.warn(`[SERVER 404] API endpoint missed: ${req.method} ${req.url}`);
+        return res.status(404).json({ 
+          error: 'Endpoint de API no encontrado (SPA Fallback)', 
+          method: req.method, 
+          url: req.url 
+        });
+      }
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }

@@ -95,6 +95,7 @@ export default function App() {
     const file = e.target.files?.[0];
     if (!file) return;
     
+    console.log('Starting bank analysis for:', file.name);
     setLoading(true);
     const formData = new FormData();
     formData.append('file', file);
@@ -112,13 +113,13 @@ export default function App() {
         try {
           if (contentType && contentType.includes('application/json')) {
             const err = await response.json();
+            console.error('API Error JSON:', err);
             errorMessage = err.error || err.message || errorMessage;
-            if (err.path) console.log('Requested path:', err.path);
           } else {
             const text = await response.text();
-            console.error('Server returned non-json error:', text.substring(0, 200));
+            console.error('Server returned non-json error:', text.substring(0, 500));
             if (response.status === 404) {
-              errorMessage = "La ruta de análisis no fue encontrada (404).";
+              errorMessage = "La ruta de análisis de API no fue encontrada (Error 404). Por favor, asegúrate de que la aplicación esté completamente desplegada y que el servidor se haya reiniciado.";
             }
           }
         } catch (e) {
@@ -128,17 +129,15 @@ export default function App() {
         throw new Error(errorMessage);
       }
 
-      if (contentType && contentType.includes('application/json')) {
-        const data = await response.json();
-        setBankResults(data);
-      } else {
-        throw new Error('La respuesta del servidor para el PDF no es JSON');
-      }
+      const data = await response.json();
+      console.log('Bank analysis success:', data);
+      setBankResults(data);
     } catch (error: any) {
       console.error('Error analyzing bank file:', error);
       alert(error.message);
     } finally {
       setLoading(false);
+      if (e.target) e.target.value = '';
     }
   };
 
