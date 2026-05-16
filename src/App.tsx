@@ -107,14 +107,25 @@ export default function App() {
 
       const contentType = response.headers.get('content-type');
       if (!response.ok) {
-        if (contentType && contentType.includes('application/json')) {
-          const err = await response.json();
-          throw new Error(err.error || 'Error al procesar PDF');
-        } else {
-          const text = await response.text();
-          console.error('PDF error response text:', text);
-          throw new Error(`Error del servidor (${response.status}) al procesar PDF`);
+        let errorMessage = `Error del servidor (${response.status}) al procesar PDF`;
+        
+        try {
+          if (contentType && contentType.includes('application/json')) {
+            const err = await response.json();
+            errorMessage = err.error || err.message || errorMessage;
+            if (err.path) console.log('Requested path:', err.path);
+          } else {
+            const text = await response.text();
+            console.error('Server returned non-json error:', text.substring(0, 200));
+            if (response.status === 404) {
+              errorMessage = "La ruta de análisis no fue encontrada (404).";
+            }
+          }
+        } catch (e) {
+          console.error('Error parsing error response:', e);
         }
+        
+        throw new Error(errorMessage);
       }
 
       if (contentType && contentType.includes('application/json')) {

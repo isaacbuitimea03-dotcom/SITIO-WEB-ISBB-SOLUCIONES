@@ -28,19 +28,28 @@ async function startServer() {
   app.use(cors());
   app.use(express.json());
 
-  // Log all requests for debugging
+  // Log all requests with more detail
   app.use((req, res, next) => {
-    console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] Incoming Request: ${req.method} ${req.url}`);
+    console.log(`[${timestamp}] Headers: ${JSON.stringify(req.headers)}`);
     next();
   });
 
-  // API Routes - Mounted directly for maximum compatibility
+  // Health check - Very simple
   app.get('/api/health', (req, res) => {
-    res.json({ ok: true, env: process.env.NODE_ENV, timestamp: new Date().toISOString() });
+    res.status(200).json({ 
+      status: 'ok', 
+      env: process.env.NODE_ENV, 
+      time: new Date().toISOString() 
+    });
   });
 
-  app.post('/api/analyze-xml', upload.array('files'), (req: Request, res: Response) => {
-    console.log('[API] analyze-xml hit');
+  // API Router for better isolation
+  const apiRouter = express.Router();
+
+  apiRouter.post('/analyze-xml', upload.array('files'), (req: Request, res: Response) => {
+    console.log('[API] analyze-xml started');
     try {
       const files = (req as MulterRequest).files as Express.Multer.File[];
       if (!files || files.length === 0) {
@@ -71,33 +80,43 @@ async function startServer() {
     }
   });
 
-  app.post('/api/analyze-bank-statement', upload.single('file'), async (req: Request, res: Response) => {
-    console.log('[API] analyze-bank-statement hit');
+  apiRouter.post('/analyze-bank-statement', upload.single('file'), async (req: Request, res: Response) => {
+    console.log('[API] analyze-bank-statement execution');
     try {
       if (!req.file) {
+        console.warn('[API] No file in request');
         return res.status(400).json({ error: 'No se subió ningún archivo' });
       }
 
       const file = req.file;
-      const isPdf = file.mimetype === 'application/pdf' || file.originalname.toLowerCase().endsWith('.pdf');
-      
-      if (!isPdf) {
-        return res.status(400).json({ error: 'El archivo debe ser un PDF' });
-      }
-
       const transactions = await extractTransactionsFromPDF(file.buffer);
+      console.log(`[API] Success - transactions: ${transactions.length}`);
+
       res.json({
         filename: file.originalname,
         transactions,
         status: 'success'
       });
     } catch (error: any) {
-      console.error("[API] analyze-bank-statement error:", error);
+      console.error("[API] analyze-bank-statement logic error:", error);
       res.status(500).json({ 
         error: error.message || 'Error interno al procesar el PDF',
         details: process.env.NODE_ENV !== 'production' ? error.stack : undefined
       });
     }
+  });
+
+  // Mount API router
+  app.use('/api', apiRouter);
+
+  // Catch-all for other /api routes
+  app.all('/api/*', (req, res) => {
+    console.warn(`[API 404] ${req.method} ${req.url}`);
+    res.status(404).json({ 
+      error: 'Ruta de API no encontrada o método no soportado',
+      path: req.originalUrl,
+      method: req.method
+    });
   });
 
   // Global Error Handler
@@ -121,12 +140,11 @@ async function startServer() {
     console.log('Serving static files from:', distPath);
     app.use(express.static(distPath));
     
+    console.log('Production mode: serving static files and catch-all');
+    
     // Everything else serves index.html (SPA fallback)
     app.get('*', (req, res) => {
-      // Check if it's an API route that missed (to return JSON 404 instead of HTML)
-      if (req.url.startsWith('/api/')) {
-        return res.status(404).json({ error: 'API endpoint not found', path: req.url });
-      }
+      // API routes should have been caught by apiRouter or the /api/* catch-all
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
