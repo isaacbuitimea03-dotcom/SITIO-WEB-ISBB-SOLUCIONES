@@ -17,6 +17,14 @@ import * as XLSX from 'xlsx';
 import { format } from 'date-fns';
 import { CFDIData } from './lib/xmlParser';
 
+interface BankTransaction {
+  fecha: string;
+  descripcion: string;
+  monto: number;
+  tipo: 'Cargo' | 'Abono';
+  referencia?: string;
+}
+
 interface AnalysisResult {
   filename: string;
   data?: CFDIData;
@@ -29,7 +37,10 @@ export default function App() {
   const [results, setResults] = useState<AnalysisResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState('');
+  const [activeTool, setActiveTool] = useState<'xml' | 'pdf'>('xml');
+  const [bankResults, setBankResults] = useState<{ filename: string; transactions: BankTransaction[] } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const pdfInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
@@ -60,6 +71,42 @@ export default function App() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const uploadAndAnalyzeBank = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    
+    setLoading(true);
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      const response = await fetch('/api/analyze-bank-statement', {
+        method: 'POST',
+        body: formData,
+      });
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.error || 'Error al procesar PDF');
+      }
+      const data = await response.json();
+      setBankResults(data);
+    } catch (error: any) {
+      alert(error.message);
+      console.error('Error analyzing bank file:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const exportBankToExcel = () => {
+    if (!bankResults || bankResults.transactions.length === 0) return;
+
+    const worksheet = XLSX.utils.json_to_sheet(bankResults.transactions);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Movimientos');
+    XLSX.writeFile(workbook, `Movimientos_Bancarios_${format(new Date(), 'yyyyMMdd')}.xlsx`);
   };
 
   const exportToExcel = () => {
@@ -162,12 +209,26 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center gap-6">
+            <div className="flex bg-white/10 p-1 rounded-xl border border-white/20">
+              <button 
+                onClick={() => setActiveTool('xml')}
+                className={`px-4 py-2 rounded-lg text-xs font-black uppercase tracking-widest transition-all ${activeTool === 'xml' ? 'bg-wheat text-slate-900 shadow-lg' : 'text-wheat/60 hover:text-wheat'}`}
+              >
+                SAT XML
+              </button>
+              <button 
+                onClick={() => setActiveTool('pdf')}
+                className={`px-4 py-2 rounded-lg text-xs font-black uppercase tracking-widest transition-all ${activeTool === 'pdf' ? 'bg-wheat text-slate-900 shadow-lg' : 'text-wheat/60 hover:text-wheat'}`}
+              >
+                PDF BANCOS
+              </button>
+            </div>
             <button 
-              onClick={() => { setResults([]); setFiles([]); }}
+              onClick={() => { setResults([]); setFiles([]); setBankResults(null); }}
               className="text-sm font-semibold text-wheat/80 hover:text-wheat transition-colors flex items-center gap-2"
             >
               <Trash2 className="w-4 h-4" />
-              Limpiar Tablero
+              Limpiar
             </button>
           </div>
         </div>
@@ -178,68 +239,126 @@ export default function App() {
           
           {/* Sidebar - Upload Controls */}
           <div className="lg:col-span-4 space-y-8">
-            <div className="bg-white p-8 rounded-3xl border border-slate-200 shadow-xl shadow-slate-200/50">
-              <h2 className="text-xl font-bold mb-6 flex items-center gap-3 text-slate-800">
-                <div className="bg-wheat/30 p-2 rounded-lg">
-                  <Upload className="w-5 h-5 text-gold-700" />
-                </div>
-                Cargar Archivos
-              </h2>
-              
-              <div 
-                onClick={() => fileInputRef.current?.click()}
-                className="border-2 border-dashed border-slate-200 rounded-2xl p-10 hover:border-gold-400 hover:bg-gold-50/30 transition-all cursor-pointer flex flex-col items-center justify-center text-center group relative overflow-hidden"
-              >
-                <div className="absolute inset-0 bg-gold-50/0 group-hover:bg-gold-50/10 transition-colors" />
-                <div className="bg-slate-100 p-5 rounded-2xl group-hover:scale-110 transition-transform relative z-10">
-                  <Upload className="w-10 h-10 text-slate-400 group-hover:text-gold-600" />
-                </div>
-                <p className="mt-5 text-sm font-bold text-slate-700 relative z-10">Arrastra archivos aquí</p>
-                <p className="text-xs text-slate-400 mt-2 relative z-10">Soporta múltiples archivos <span className="bg-slate-100 px-1.5 py-0.5 rounded">.xml</span> del SAT</p>
-                <input 
-                  type="file" 
-                  ref={fileInputRef} 
-                  onChange={handleFileChange} 
-                  multiple 
-                  accept=".xml" 
-                  className="hidden" 
-                />
-              </div>
-
-              {files.length > 0 && (
-                <div className="mt-8 space-y-4">
-                  <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-                    <span className="text-sm font-bold text-slate-500 uppercase tracking-wider">{files.length} seleccionados</span>
+            {activeTool === 'xml' ? (
+              <div className="bg-white p-8 rounded-3xl border border-slate-200 shadow-xl shadow-slate-200/50">
+                <h2 className="text-xl font-bold mb-6 flex items-center gap-3 text-slate-800">
+                  <div className="bg-wheat/30 p-2 rounded-lg">
+                    <Upload className="w-5 h-5 text-gold-700" />
                   </div>
-                  <div className="max-h-60 overflow-y-auto space-y-2 pr-2 custom-scrollbar">
-                    {files.map((file, i) => (
-                      <div key={i} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl text-xs group border border-transparent hover:border-gold-200 hover:bg-white transition-all shadow-sm">
-                        <div className="flex items-center gap-2 font-medium text-slate-600">
-                          <FileText className="w-4 h-4 text-gold-500" />
-                          <span className="truncate max-w-[180px]">{file.name}</span>
+                  Cargar Facturas XML
+                </h2>
+                
+                <div 
+                  onClick={() => fileInputRef.current?.click()}
+                  className="border-2 border-dashed border-slate-200 rounded-2xl p-10 hover:border-gold-400 hover:bg-gold-50/30 transition-all cursor-pointer flex flex-col items-center justify-center text-center group relative overflow-hidden"
+                >
+                  <div className="absolute inset-0 bg-gold-50/0 group-hover:bg-gold-50/10 transition-colors" />
+                  <div className="bg-slate-100 p-5 rounded-2xl group-hover:scale-110 transition-transform relative z-10">
+                    <Upload className="w-10 h-10 text-slate-400 group-hover:text-gold-600" />
+                  </div>
+                  <p className="mt-5 text-sm font-bold text-slate-700 relative z-10">Arrastra archivos aquí</p>
+                  <p className="text-xs text-slate-400 mt-2 relative z-10">Soporta múltiples archivos <span className="bg-slate-100 px-1.5 py-0.5 rounded">.xml</span> del SAT</p>
+                  <input 
+                    type="file" 
+                    ref={fileInputRef} 
+                    onChange={handleFileChange} 
+                    multiple 
+                    accept=".xml" 
+                    className="hidden" 
+                  />
+                </div>
+
+                {files.length > 0 && (
+                  <div className="mt-8 space-y-4">
+                    <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+                      <span className="text-sm font-bold text-slate-500 uppercase tracking-wider">{files.length} seleccionados</span>
+                    </div>
+                    <div className="max-h-60 overflow-y-auto space-y-2 pr-2 custom-scrollbar">
+                      {files.map((file, i) => (
+                        <div key={i} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl text-xs group border border-transparent hover:border-gold-200 hover:bg-white transition-all shadow-sm">
+                          <div className="flex items-center gap-2 font-medium text-slate-600">
+                            <FileText className="w-4 h-4 text-gold-500" />
+                            <span className="truncate max-w-[180px]">{file.name}</span>
+                          </div>
+                          <button onClick={() => removeFile(i)} className="text-slate-400 hover:text-red-500 transition-colors">
+                            <Trash2 className="w-4 h-4" />
+                          </button>
                         </div>
-                        <button onClick={() => removeFile(i)} className="text-slate-400 hover:text-red-500 transition-colors">
-                          <Trash2 className="w-4 h-4" />
+                      ))}
+                    </div>
+                    <button 
+                      onClick={uploadAndAnalyze}
+                      disabled={loading}
+                      className="w-full bg-slate-900 text-gold font-bold py-4 rounded-2xl shadow-xl shadow-slate-200 hover:bg-slate-800 disabled:opacity-50 transition-all flex items-center justify-center gap-3 mt-6 ring-2 ring-gold/20"
+                    >
+                      {loading ? (
+                        <div className="w-6 h-6 border-3 border-wheat/20 border-t-wheat rounded-full animate-spin" />
+                      ) : (
+                        <>PROCESAR XML <ChevronRight className="w-5 h-5" /></>
+                      )}
+                    </button>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="bg-white p-8 rounded-3xl border border-slate-200 shadow-xl shadow-slate-200/50">
+                <h2 className="text-xl font-bold mb-6 flex items-center gap-3 text-slate-800">
+                  <div className="bg-blue-50 p-2 rounded-lg">
+                    <FileText className="w-5 h-5 text-blue-600" />
+                  </div>
+                  Estado de Cuenta PDF
+                </h2>
+                
+                <p className="text-xs text-slate-500 mb-6 leading-relaxed">
+                  Utiliza <strong>IA Generativa</strong> para leer y extraer movimientos de estados de cuenta bancarios (PDF digitales).
+                </p>
+
+                <div 
+                  onClick={() => !loading && pdfInputRef.current?.click()}
+                  className={`border-2 border-dashed border-slate-200 rounded-2xl p-10 transition-all flex flex-col items-center justify-center text-center group relative overflow-hidden ${loading ? 'opacity-50 cursor-not-allowed' : 'hover:border-blue-400 hover:bg-blue-50/30 cursor-pointer'}`}
+                >
+                  <div className="bg-slate-100 p-5 rounded-2xl group-hover:scale-110 transition-transform relative z-10">
+                    <Upload className="w-10 h-10 text-slate-400 group-hover:text-blue-600" />
+                  </div>
+                  <p className="mt-5 text-sm font-bold text-slate-700 relative z-10">Cargar PDF Bancario</p>
+                  <input 
+                    type="file" 
+                    ref={pdfInputRef} 
+                    onChange={uploadAndAnalyzeBank} 
+                    accept=".pdf" 
+                    className="hidden" 
+                  />
+                  {loading && activeTool === 'pdf' && (
+                    <div className="absolute inset-0 bg-white/60 backdrop-blur-sm z-20 flex flex-col items-center justify-center">
+                      <div className="w-8 h-8 border-4 border-blue-600/20 border-t-blue-600 rounded-full animate-spin mb-3" />
+                      <p className="text-[10px] font-black uppercase tracking-widest text-blue-700">Analizando con AI...</p>
+                    </div>
+                  )}
+                </div>
+
+                {bankResults && (
+                  <div className="mt-8">
+                    <div className="bg-slate-900 rounded-2xl p-6 text-white overflow-hidden relative shadow-lg">
+                      <h3 className="text-wheat text-[10px] font-black uppercase tracking-[0.2em] mb-4">Análisis Completado</h3>
+                      <div className="space-y-4 relative z-10">
+                        <div className="flex justify-between items-center text-sm">
+                          <span className="text-white/60">Transacciones:</span>
+                          <span className="font-black text-wheat">{bankResults.transactions.length}</span>
+                        </div>
+                        <button 
+                          onClick={exportBankToExcel}
+                          className="w-full bg-wheat text-slate-900 py-3 rounded-xl font-black text-xs uppercase tracking-wider hover:bg-white transition-all flex items-center justify-center gap-2"
+                        >
+                          <Download className="w-4 h-4" /> Exportar Movimientos
                         </button>
                       </div>
-                    ))}
+                    </div>
                   </div>
-                  <button 
-                    onClick={uploadAndAnalyze}
-                    disabled={loading}
-                    className="w-full bg-slate-900 text-gold font-bold py-4 rounded-2xl shadow-xl shadow-slate-200 hover:bg-slate-800 disabled:opacity-50 transition-all flex items-center justify-center gap-3 mt-6 ring-2 ring-gold/20"
-                  >
-                    {loading ? (
-                      <div className="w-6 h-6 border-3 border-wheat/20 border-t-wheat rounded-full animate-spin" />
-                    ) : (
-                      <>PROCESAR XML <ChevronRight className="w-5 h-5" /></>
-                    )}
-                  </button>
-                </div>
-              )}
-            </div>
+                )}
+              </div>
+            )}
 
-            {results.length > 0 && (
+            {results.length > 0 && activeTool === 'xml' && (
               <div className="bg-slate-900 rounded-3xl p-8 text-white overflow-hidden relative shadow-2xl">
                 <div className="relative z-10">
                   <div className="flex items-center gap-2 mb-6">
@@ -271,146 +390,208 @@ export default function App() {
 
           {/* Main Content - Results Table */}
           <div className="lg:col-span-8 space-y-8">
-            {!results.length ? (
-              <div className="h-[650px] bg-white rounded-3xl border border-slate-200 flex flex-col items-center justify-center text-center p-12 shadow-sm border-dashed">
-                <div className="bg-wheat/10 p-8 rounded-full mb-8">
-                  <TableIcon className="w-16 h-16 text-wheat-dark" />
-                </div>
-                <h3 className="text-3xl font-black text-slate-800 mb-3 tracking-tight">Sin Reportes</h3>
-                <p className="text-slate-400 max-w-sm text-sm leading-relaxed font-medium">
-                  ISBB SOLUCIONES procesa tus archivos XML de forma local y segura. Carga tus facturas para comenzar.
-                </p>
-              </div>
-            ) : (
-              <motion.div 
-                initial={{ opacity: 0, y: 30 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="bg-white rounded-3xl border border-slate-200 shadow-xl shadow-slate-200/50 overflow-hidden"
-              >
-                <div className="p-8 border-b border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-6 bg-slate-50/50">
-                  <div>
-                    <h3 className="text-2xl font-black text-slate-800 tracking-tight transition-all">Consolidado Fiscal</h3>
-                    <p className="text-xs text-slate-400 font-bold mt-1 uppercase tracking-widest italic">Registros procesados en tiempo real</p>
+            {activeTool === 'xml' ? (
+              !results.length ? (
+                <div className="h-[650px] bg-white rounded-3xl border border-slate-200 flex flex-col items-center justify-center text-center p-12 shadow-sm border-dashed">
+                  <div className="bg-wheat/10 p-8 rounded-full mb-8">
+                    <TableIcon className="w-16 h-16 text-wheat-dark" />
                   </div>
-                  <div className="relative group max-w-md w-full">
-                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 group-focus-within:text-gold-600 transition-colors" />
-                    <input 
-                      type="text" 
-                      placeholder="Buscar por RFC, Nombre, UUID..." 
-                      value={filter}
-                      onChange={(e) => setFilter(e.target.value)}
-                      className="w-full pl-12 pr-5 py-3.5 border border-slate-200 rounded-2xl text-sm font-medium focus:outline-none focus:ring-4 focus:ring-gold-500/10 focus:border-gold-400 transition-all bg-white shadow-inner"
-                    />
-                  </div>
+                  <h3 className="text-3xl font-black text-slate-800 mb-3 tracking-tight">Sin Reportes</h3>
+                  <p className="text-slate-400 max-w-sm text-sm leading-relaxed font-medium">
+                    ISBB SOLUCIONES procesa tus archivos XML de forma local y segura. Carga tus facturas para comenzar.
+                  </p>
                 </div>
+              ) : (
+                <motion.div 
+                  initial={{ opacity: 0, y: 30 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="bg-white rounded-3xl border border-slate-200 shadow-xl shadow-slate-200/50 overflow-hidden"
+                >
+                  <div className="p-8 border-b border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-6 bg-slate-50/50">
+                    <div>
+                      <h3 className="text-2xl font-black text-slate-800 tracking-tight transition-all">Consolidado Fiscal</h3>
+                      <p className="text-xs text-slate-400 font-bold mt-1 uppercase tracking-widest italic">Registros procesados en tiempo real</p>
+                    </div>
+                    <div className="relative group max-w-md w-full">
+                      <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 group-focus-within:text-gold-600 transition-colors" />
+                      <input 
+                        type="text" 
+                        placeholder="Buscar por RFC, Nombre, UUID..." 
+                        value={filter}
+                        onChange={(e) => setFilter(e.target.value)}
+                        className="w-full pl-12 pr-5 py-3.5 border border-slate-200 rounded-2xl text-sm font-medium focus:outline-none focus:ring-4 focus:ring-gold-500/10 focus:border-gold-400 transition-all bg-white shadow-inner"
+                      />
+                    </div>
+                  </div>
 
-                <div className="overflow-x-auto custom-scrollbar">
-                  <table className="w-full text-left border-collapse min-w-[800px]">
-                    <thead className="bg-slate-900 border-b border-white/10">
-                      <tr>
-                        <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em]">Estado</th>
-                        <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em]">Participantes</th>
-                        <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em]">Temporalidad</th>
-                        <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em] text-right">Subtotal</th>
-                        <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em] text-right">Impuestos</th>
-                        <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em] text-right">Total MXN</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      <AnimatePresence mode='popLayout'>
-                        {filteredResults.map((result, idx) => (
-                          <motion.tr 
-                            layout
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
-                            exit={{ opacity: 0 }}
-                            key={result.data?.uuid || idx} 
-                            className="hover:bg-gold-50/20 transition-colors group cursor-default"
-                          >
-                            <td className="px-8 py-6">
-                              {result.status === 'success' ? (
-                                <div className="bg-emerald-50 w-10 h-10 rounded-full flex items-center justify-center border border-emerald-100 shadow-sm">
-                                  <CheckCircle2 className="w-6 h-6 text-emerald-500" />
-                                </div>
-                              ) : (
-                                <div className="bg-red-50 w-10 h-10 rounded-full flex items-center justify-center border border-red-100 shadow-sm">
-                                  <AlertCircle className="w-6 h-6 text-red-500" />
-                                </div>
-                              )}
-                            </td>
-                            <td className="px-8 py-6">
-                              {result.status === 'success' ? (
-                                <div className="space-y-1.5">
-                                  <div className="text-sm font-black text-slate-800 truncate max-w-[220px]" title={`Emisor: ${result.data?.emisorNombre}`}>
-                                    <span className="text-gold-600 font-black text-[9px] mr-2 bg-gold-50 px-1.5 py-0.5 rounded border border-gold-200">E</span>
-                                    {result.data?.emisorNombre}
+                  <div className="overflow-x-auto custom-scrollbar">
+                    <table className="w-full text-left border-collapse min-w-[800px]">
+                      <thead className="bg-slate-900 border-b border-white/10">
+                        <tr>
+                          <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em]">Estado</th>
+                          <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em]">Participantes</th>
+                          <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em]">Temporalidad</th>
+                          <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em] text-right">Subtotal</th>
+                          <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em] text-right">Impuestos</th>
+                          <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em] text-right">Total MXN</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        <AnimatePresence mode='popLayout'>
+                          {filteredResults.map((result, idx) => (
+                            <motion.tr 
+                              layout
+                              initial={{ opacity: 0 }}
+                              animate={{ opacity: 1 }}
+                              exit={{ opacity: 0 }}
+                              key={result.data?.uuid || idx} 
+                              className="hover:bg-gold-50/20 transition-colors group cursor-default"
+                            >
+                              <td className="px-8 py-6">
+                                {result.status === 'success' ? (
+                                  <div className="bg-emerald-50 w-10 h-10 rounded-full flex items-center justify-center border border-emerald-100 shadow-sm">
+                                    <CheckCircle2 className="w-6 h-6 text-emerald-500" />
                                   </div>
-                                  <div className="text-xs text-slate-500 font-bold truncate max-w-[220px]" title={`Receptor: ${result.data?.receptorNombre}`}>
-                                    <span className="text-slate-400 font-black text-[9px] mr-2 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">R</span>
-                                    {result.data?.receptorNombre}
+                                ) : (
+                                  <div className="bg-red-50 w-10 h-10 rounded-full flex items-center justify-center border border-red-100 shadow-sm">
+                                    <AlertCircle className="w-6 h-6 text-red-500" />
                                   </div>
-                                </div>
-                              ) : (
-                                <span className="text-xs text-red-500 font-black italic">{result.error}</span>
-                              )}
-                            </td>
-                            <td className="px-8 py-6">
-                              {result.status === 'success' && (
-                                <div className="space-y-2">
-                                  <div className="text-xs font-black text-slate-700 tracking-tight">
-                                    {result.data?.fecha ? format(new Date(result.data.fecha), 'dd MMM, yyyy') : 'N/A'}
+                                )}
+                              </td>
+                              <td className="px-8 py-6">
+                                {result.status === 'success' ? (
+                                  <div className="space-y-1.5">
+                                    <div className="text-sm font-black text-slate-800 truncate max-w-[220px]" title={`Emisor: ${result.data?.emisorNombre}`}>
+                                      <span className="text-gold-600 font-black text-[9px] mr-2 bg-gold-50 px-1.5 py-0.5 rounded border border-gold-200">E</span>
+                                      {result.data?.emisorNombre}
+                                    </div>
+                                    <div className="text-xs text-slate-500 font-bold truncate max-w-[220px]" title={`Receptor: ${result.data?.receptorNombre}`}>
+                                      <span className="text-slate-400 font-black text-[9px] mr-2 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">R</span>
+                                      {result.data?.receptorNombre}
+                                    </div>
                                   </div>
-                                  <div className="inline-flex px-3 py-1 rounded-lg text-[9px] bg-slate-900 text-wheat font-black uppercase tracking-widest shadow-sm">
-                                    {result.data?.tipo}
+                                ) : (
+                                  <span className="text-xs text-red-500 font-black italic">{result.error}</span>
+                                )}
+                              </td>
+                              <td className="px-8 py-6">
+                                {result.status === 'success' && (
+                                  <div className="space-y-2">
+                                    <div className="text-xs font-black text-slate-700 tracking-tight">
+                                      {result.data?.fecha ? format(new Date(result.data.fecha), 'dd MMM, yyyy') : 'N/A'}
+                                    </div>
+                                    <div className="inline-flex px-3 py-1 rounded-lg text-[9px] bg-slate-900 text-wheat font-black uppercase tracking-widest shadow-sm">
+                                      {result.data?.tipo}
+                                    </div>
                                   </div>
-                                </div>
-                              )}
-                            </td>
-                            <td className="px-8 py-6 text-right whitespace-nowrap">
-                              <span className="text-sm font-black text-slate-600">
-                                {result.status === 'success' && result.data ? `$${result.data.subtotal.toLocaleString('es-MX', { minimumFractionDigits: 2 })}` : '-'}
-                              </span>
-                            </td>
-                            <td className="px-8 py-6 text-right whitespace-nowrap">
-                              <div className="space-y-1 bg-white/50 p-2 rounded-xl border border-slate-100">
-                                {result.status === 'success' && result.data?.impuestos?.desglose?.iva16 !== 0 && (
-                                  <div className="text-[10px] font-black text-emerald-700 uppercase">IVA 16%: <span className="text-slate-900">${result.data?.impuestos?.desglose?.iva16?.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span></div>
                                 )}
-                                {result.status === 'success' && result.data?.impuestos?.desglose?.iva8 !== 0 && (
-                                  <div className="text-[10px] font-black text-emerald-700 uppercase">IVA 8%: <span className="text-slate-900">${result.data?.impuestos?.desglose?.iva8?.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span></div>
-                                )}
-                                {result.status === 'success' && result.data?.impuestos?.desglose?.ieps !== 0 && (
-                                  <div className="text-[10px] font-black text-blue-700 uppercase">IEPS: <span className="text-slate-900">${result.data?.impuestos?.desglose?.ieps?.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span></div>
-                                )}
-                                {result.status === 'success' && result.data?.impuestos?.desglose?.retIVA !== 0 && (
-                                  <div className="text-[10px] font-black text-red-700 uppercase">Ret IVA: <span className="text-slate-900">-${result.data?.impuestos?.desglose?.retIVA?.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span></div>
-                                )}
-                                {result.status === 'success' && result.data?.impuestos?.desglose?.retISR !== 0 && (
-                                  <div className="text-[10px] font-black text-red-700 uppercase">Ret ISR: <span className="text-slate-900">-${result.data?.impuestos?.desglose?.retISR?.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span></div>
-                                )}
-                                {result.status === 'success' && result.data?.impuestos?.desglose?.ivaExento !== 0 && (
-                                  <div className="text-[10px] font-black text-slate-500 uppercase">Exento: <span className="text-slate-900">${result.data?.impuestos?.desglose?.ivaExento?.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span></div>
-                                )}
-                                {result.status === 'success' && result.data?.impuestos?.desglose?.baseNoObjeto !== 0 && (
-                                  <div className="text-[10px] font-black text-slate-500 uppercase">No Objeto: <span className="text-slate-900">${result.data?.impuestos?.desglose?.baseNoObjeto?.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span></div>
-                                )}
-                              </div>
-                            </td>
-                            <td className="px-8 py-6 text-right whitespace-nowrap">
-                              <div className="inline-flex flex-col items-end">
-                                <span className="text-lg font-black text-slate-900 tracking-tighter">
-                                  {result.status === 'success' && result.data ? `$${result.data.total.toLocaleString('es-MX', { minimumFractionDigits: 2 })}` : '-'}
+                              </td>
+                              <td className="px-8 py-6 text-right whitespace-nowrap">
+                                <span className="text-sm font-black text-slate-600">
+                                  {result.status === 'success' && result.data ? `$${result.data.subtotal.toLocaleString('es-MX', { minimumFractionDigits: 2 })}` : '-'}
                                 </span>
-                                <span className="text-[8px] font-black text-gold-600 uppercase tracking-widest mt-0.5">Monto Total</span>
-                              </div>
-                            </td>
-                          </motion.tr>
-                        ))}
-                      </AnimatePresence>
-                    </tbody>
-                  </table>
+                              </td>
+                              <td className="px-8 py-6 text-right whitespace-nowrap">
+                                <div className="space-y-1 bg-white/50 p-2 rounded-xl border border-slate-100">
+                                  {result.status === 'success' && result.data?.impuestos?.desglose?.iva16 !== 0 && (
+                                    <div className="text-[10px] font-black text-emerald-700 uppercase">IVA 16%: <span className="text-slate-900">${result.data?.impuestos?.desglose?.iva16?.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span></div>
+                                  )}
+                                  {result.status === 'success' && result.data?.impuestos?.desglose?.iva8 !== 0 && (
+                                    <div className="text-[10px] font-black text-emerald-700 uppercase">IVA 8%: <span className="text-slate-900">${result.data?.impuestos?.desglose?.iva8?.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span></div>
+                                  )}
+                                  {result.status === 'success' && result.data?.impuestos?.desglose?.ieps !== 0 && (
+                                    <div className="text-[10px] font-black text-blue-700 uppercase">IEPS: <span className="text-slate-900">${result.data?.impuestos?.desglose?.ieps?.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span></div>
+                                  )}
+                                  {result.status === 'success' && result.data?.impuestos?.desglose?.retIVA !== 0 && (
+                                    <div className="text-[10px] font-black text-red-700 uppercase">Ret IVA: <span className="text-slate-900">-${result.data?.impuestos?.desglose?.retIVA?.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span></div>
+                                  )}
+                                  {result.status === 'success' && result.data?.impuestos?.desglose?.retISR !== 0 && (
+                                    <div className="text-[10px] font-black text-red-700 uppercase">Ret ISR: <span className="text-slate-900">-${result.data?.impuestos?.desglose?.retISR?.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span></div>
+                                  )}
+                                  {result.status === 'success' && result.data?.impuestos?.desglose?.ivaExento !== 0 && (
+                                    <div className="text-[10px] font-black text-slate-500 uppercase">Exento: <span className="text-slate-900">${result.data?.impuestos?.desglose?.ivaExento?.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span></div>
+                                  )}
+                                  {result.status === 'success' && result.data?.impuestos?.desglose?.baseNoObjeto !== 0 && (
+                                    <div className="text-[10px] font-black text-slate-500 uppercase">No Objeto: <span className="text-slate-900">${result.data?.impuestos?.desglose?.baseNoObjeto?.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span></div>
+                                  )}
+                                </div>
+                              </td>
+                              <td className="px-8 py-6 text-right whitespace-nowrap">
+                                <div className="inline-flex flex-col items-end">
+                                  <span className="text-lg font-black text-slate-900 tracking-tighter">
+                                    {result.status === 'success' && result.data ? `$${result.data.total.toLocaleString('es-MX', { minimumFractionDigits: 2 })}` : '-'}
+                                  </span>
+                                  <span className="text-[8px] font-black text-gold-600 uppercase tracking-widest mt-0.5">Monto Total</span>
+                                </div>
+                              </td>
+                            </motion.tr>
+                          ))}
+                        </AnimatePresence>
+                      </tbody>
+                    </table>
+                  </div>
+                </motion.div>
+              )
+            ) : (
+              /* PDF TOOL CONTENT */
+              !bankResults ? (
+                <div className="h-[650px] bg-white rounded-3xl border border-slate-200 flex flex-col items-center justify-center text-center p-12 shadow-sm border-dashed">
+                  <div className="bg-blue-50 p-8 rounded-full mb-8">
+                    <FileText className="w-16 h-16 text-blue-400" />
+                  </div>
+                  <h3 className="text-3xl font-black text-slate-800 mb-3 tracking-tight">Reporte Bancario AI</h3>
+                  <p className="text-slate-400 max-w-sm text-sm leading-relaxed font-medium">
+                    Sube un estado de cuenta en PDF para extraer automáticamente todos los movimientos utilizando Inteligencia Artificial.
+                  </p>
                 </div>
-              </motion.div>
+              ) : (
+                <motion.div 
+                  initial={{ opacity: 0, y: 30 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="bg-white rounded-3xl border border-slate-200 shadow-xl shadow-slate-200/50 overflow-hidden"
+                >
+                  <div className="p-8 border-b border-slate-100 flex items-center justify-between bg-blue-50/30">
+                    <div>
+                      <h3 className="text-2xl font-black text-slate-800 tracking-tight">Movimientos Bancarios</h3>
+                      <p className="text-xs text-blue-600 font-bold mt-1 uppercase tracking-widest">{bankResults.filename}</p>
+                    </div>
+                    <div className="flex items-center gap-3">
+                       <span className="bg-white px-4 py-2 rounded-xl border border-blue-100 text-xs font-black text-blue-600 shadow-sm">
+                         AI EXTRACTOR
+                       </span>
+                    </div>
+                  </div>
+
+                  <div className="overflow-x-auto custom-scrollbar">
+                    <table className="w-full text-left border-collapse min-w-[800px]">
+                      <thead className="bg-slate-900 border-b border-white/10">
+                        <tr>
+                          <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em]">Fecha</th>
+                          <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em]">Descripción / Concepto</th>
+                          <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em]">Referencia</th>
+                          <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em] text-right">Cargo</th>
+                          <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em] text-right">Abono</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {bankResults.transactions.map((tx, idx) => (
+                          <tr key={idx} className="hover:bg-blue-50/20 transition-colors group">
+                            <td className="px-8 py-6 text-sm font-bold text-slate-700">{tx.fecha}</td>
+                            <td className="px-8 py-6 text-sm font-medium text-slate-600 max-w-[400px]">{tx.descripcion}</td>
+                            <td className="px-8 py-6 text-xs font-mono text-slate-400">{tx.referencia || '-'}</td>
+                            <td className="px-8 py-6 text-right font-bold text-red-600">
+                              {tx.tipo === 'Cargo' ? `$${tx.monto.toLocaleString('es-MX', { minimumFractionDigits: 2 })}` : '-'}
+                            </td>
+                            <td className="px-8 py-6 text-right font-bold text-emerald-600">
+                              {tx.tipo === 'Abono' ? `$${tx.monto.toLocaleString('es-MX', { minimumFractionDigits: 2 })}` : '-'}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </motion.div>
+              )
             )}
           </div>
         </div>
