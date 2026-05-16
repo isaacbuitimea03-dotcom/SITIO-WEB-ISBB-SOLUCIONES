@@ -2,11 +2,17 @@ import express, { Request, Response } from 'express';
 import path from 'path';
 import multer from 'multer';
 import { createServer as createViteServer } from 'vite';
-import { parseCFDI } from './src/lib/xmlParser.js';
-import { extractTransactionsFromText } from './src/services/geminiService.js';
+import { parseCFDI } from './src/lib/xmlParser.ts';
+import { extractTransactionsFromText } from './src/services/geminiService.ts';
 import cors from 'cors';
 
-const upload = multer({ storage: multer.memoryStorage() });
+console.log('--- SERVER INITIATING ---');
+console.log('Current working directory:', process.cwd());
+
+const upload = multer({ 
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
+});
 
 interface MulterRequest extends Request {
   files: any;
@@ -26,6 +32,7 @@ async function startServer() {
   });
 
   app.post('/api/analyze-xml', upload.array('files'), (req: Request, res: Response) => {
+    console.log('API HIT: /api/analyze-xml', { filesCount: (req as any).files?.length });
     try {
       const files = (req as MulterRequest).files as Express.Multer.File[];
       if (!files || files.length === 0) {
@@ -56,6 +63,11 @@ async function startServer() {
   });
 
   app.post('/api/analyze-bank-statement', upload.single('file'), async (req: Request, res: Response) => {
+    console.log('API HIT: /api/analyze-bank-statement', { 
+      hasFile: !!req.file, 
+      filename: req.file?.originalname,
+      mimetype: req.file?.mimetype 
+    });
     try {
       const file = req.file;
       if (!file) {
@@ -66,8 +78,16 @@ async function startServer() {
         return res.status(400).json({ error: 'El archivo debe ser un PDF' });
       }
 
-      // Extract text from PDF - Lazy load pdf-parse
-      const { default: pdf } = await import('pdf-parse/lib/pdf-parse.js');
+      // Extract text from PDF - Use careful import for CJS module in ESM
+      let pdf;
+      try {
+        const pdfParseModule = await import('pdf-parse');
+        pdf = pdfParseModule.default || pdfParseModule;
+      } catch (e) {
+        console.error("Failed to load pdf-parse:", e);
+        throw new Error("Error técnico: No se pudo cargar el procesador de PDF.");
+      }
+
       const data = await pdf(file.buffer);
       const textContent = data.text;
 
@@ -86,6 +106,14 @@ async function startServer() {
     } catch (error: any) {
       console.error("PDF Analysis Error:", error);
       res.status(500).json({ error: error.message || 'Error interno al procesar el PDF' });
+    }
+  });
+
+  // Global Error Handler
+  app.use((err: any, req: Request, res: Response, next: any) => {
+    console.error('SERVER ERROR:', err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Error interno del servidor', message: err.message });
     }
   });
 
@@ -110,4 +138,7 @@ async function startServer() {
   });
 }
 
-startServer();
+startServer().catch(err => {
+  console.error('CRITICAL STARTUP ERROR:', err);
+  process.exit(1);
+});

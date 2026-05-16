@@ -1,13 +1,24 @@
 import { GoogleGenAI, Type } from "@google/genai";
 
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
+let genAI: GoogleGenAI | null = null;
+
+function getGenAI() {
+  if (!genAI) {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      throw new Error("La clave de API de Gemini (GEMINI_API_KEY) no está configurada.");
     }
+    genAI = new GoogleGenAI({
+      apiKey: apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        }
+      }
+    });
   }
-});
+  return genAI;
+}
 
 export interface BankTransaction {
   fecha: string;
@@ -18,6 +29,8 @@ export interface BankTransaction {
 }
 
 export async function extractTransactionsFromText(text: string): Promise<BankTransaction[]> {
+  const ai = getGenAI();
+  
   const prompt = `
     Analiza el siguiente texto extraído de un estado de cuenta bancario y extrae todos los movimientos o transacciones en una lista estructurada.
     Cada transacción debe tener:
@@ -28,7 +41,7 @@ export async function extractTransactionsFromText(text: string): Promise<BankTra
     - referencia: Cualquier número de referencia o autorización (opcional).
 
     Texto del estado de cuenta:
-    ${text.substring(0, 30000)} // Limit text size for token limits
+    ${text.substring(0, 30000)}
 
     IMPORTANTE: Solo devuelve el JSON siguiendo estrictamente el esquema proporcionado.
   `;
@@ -57,8 +70,8 @@ export async function extractTransactionsFromText(text: string): Promise<BankTra
     });
 
     return JSON.parse(response.text || '[]');
-  } catch (error) {
+  } catch (error: any) {
     console.error("Gemini Error:", error);
-    throw new Error("Error al procesar el estado de cuenta con IA");
+    throw new Error(`Error al procesar el estado de cuenta con IA: ${error.message}`);
   }
 }

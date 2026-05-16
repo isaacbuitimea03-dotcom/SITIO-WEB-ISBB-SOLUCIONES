@@ -64,10 +64,28 @@ export default function App() {
         method: 'POST',
         body: formData,
       });
-      const data = await response.json();
-      setResults(data);
-    } catch (error) {
+      
+      const contentType = response.headers.get('content-type');
+      if (!response.ok) {
+        if (contentType && contentType.includes('application/json')) {
+          const errData = await response.json();
+          throw new Error(errData.error || `Error del servidor: ${response.status}`);
+        } else {
+          const text = await response.text();
+          console.error('Server error (non-json):', text);
+          throw new Error(`Error del servidor (${response.status}). Ver consola para detalles.`);
+        }
+      }
+
+      if (contentType && contentType.includes('application/json')) {
+        const data = await response.json();
+        setResults(data);
+      } else {
+        throw new Error('La respuesta del servidor no es un JSON válido');
+      }
+    } catch (error: any) {
       console.error('Error analyzing files:', error);
+      alert(error.message || 'Error al conectar con el servidor');
     } finally {
       setLoading(false);
     }
@@ -86,15 +104,28 @@ export default function App() {
         method: 'POST',
         body: formData,
       });
+
+      const contentType = response.headers.get('content-type');
       if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.error || 'Error al procesar PDF');
+        if (contentType && contentType.includes('application/json')) {
+          const err = await response.json();
+          throw new Error(err.error || 'Error al procesar PDF');
+        } else {
+          const text = await response.text();
+          console.error('PDF error response text:', text);
+          throw new Error(`Error del servidor (${response.status}) al procesar PDF`);
+        }
       }
-      const data = await response.json();
-      setBankResults(data);
+
+      if (contentType && contentType.includes('application/json')) {
+        const data = await response.json();
+        setBankResults(data);
+      } else {
+        throw new Error('La respuesta del servidor para el PDF no es JSON');
+      }
     } catch (error: any) {
-      alert(error.message);
       console.error('Error analyzing bank file:', error);
+      alert(error.message);
     } finally {
       setLoading(false);
     }
