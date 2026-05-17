@@ -51,12 +51,22 @@ export async function extractTransactionsFromPDF(buffer: Buffer): Promise<BankTr
   `;
 
   try {
-    console.log('[GeminiService] Llamando a Gemini API (gemini-1.5-flash)...');
+    console.log('[GeminiService] Llamando a Gemini API (gemini-3-flash-preview)...');
     
-    // Standard SDK pattern for @google/genai
-    const model = ai.getGenerativeModel({ 
-      model: "gemini-1.5-flash",
-      generationConfig: {
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: {
+        parts: [
+          {
+            inlineData: {
+              data: buffer.toString('base64'),
+              mimeType: 'application/pdf'
+            }
+          },
+          { text: prompt }
+        ]
+      },
+      config: {
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.ARRAY,
@@ -75,18 +85,7 @@ export async function extractTransactionsFromPDF(buffer: Buffer): Promise<BankTr
       }
     });
 
-    const result = await model.generateContent([
-      {
-        inlineData: {
-          data: buffer.toString('base64'),
-          mimeType: 'application/pdf'
-        }
-      },
-      { text: prompt }
-    ]);
-
-    const response = await result.response;
-    const text = response.text();
+    const text = response.text;
     console.log('[GeminiService] Crudo:', text?.substring(0, 100));
     
     if (!text) {
