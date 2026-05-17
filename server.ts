@@ -41,7 +41,8 @@ async function startServer() {
   app.get('/api/health', (req, res) => {
     res.json({ 
       status: 'ok', 
-      deployment: 'isbb-v6-stable', 
+      deployment: 'isbb-v7-stable', 
+      version: '2.4',
       time: new Date().toISOString(),
       node: process.version
     });

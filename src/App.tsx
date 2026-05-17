@@ -696,7 +696,7 @@ export default function App() {
           </p>
           <div className="w-12 h-1 bg-wheat mx-auto my-8 rounded-full opacity-30" />
           <p className="text-white/20 text-[10px] font-medium tracking-wider">
-            © {new Date().getFullYear()} ISBB SOLUCIONES - v2.3 PROD FINAL FIX 01:05
+            © {new Date().getFullYear()} ISBB SOLUCIONES - v2.5 FINAL 01:10
           </p>
         </div>
       </footer>

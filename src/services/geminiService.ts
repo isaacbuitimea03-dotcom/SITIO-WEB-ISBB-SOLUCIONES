@@ -52,38 +52,58 @@ export async function extractTransactionsFromPDF(buffer: Buffer): Promise<BankTr
 
   try {
     console.log('[GeminiService] Llamando a Gemini API (gemini-3-flash-preview)...');
+    console.log('[GeminiService] SDK Keys:', Object.keys(ai));
+    if (ai.models) console.log('[GeminiService] Models Keys:', Object.keys(ai.models));
     
-    const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
-      contents: {
-        parts: [
-          {
-            inlineData: {
-              data: buffer.toString('base64'),
-              mimeType: 'application/pdf'
-            }
-          },
-          { text: prompt }
-        ]
-      },
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              fecha: { type: Type.STRING },
-              descripcion: { type: Type.STRING },
-              monto: { type: Type.NUMBER },
-              tipo: { type: Type.STRING, description: "Cargo o Abono" },
-              referencia: { type: Type.STRING },
+    // Attempt standard call with fallback
+    let response;
+    if (ai.models && typeof ai.models.generateContent === 'function') {
+      response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: {
+          parts: [
+            {
+              inlineData: {
+                data: buffer.toString('base64'),
+                mimeType: 'application/pdf'
+              }
             },
-            required: ['fecha', 'descripcion', 'monto', 'tipo'],
-          },
+            { text: prompt }
+          ]
         },
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                fecha: { type: Type.STRING },
+                descripcion: { type: Type.STRING },
+                monto: { type: Type.NUMBER },
+                tipo: { type: Type.STRING, description: "Cargo o Abono" },
+                referencia: { type: Type.STRING },
+              },
+              required: ['fecha', 'descripcion', 'monto', 'tipo'],
+            },
+          },
+        }
+      });
+    } else {
+      console.warn('[GeminiService] Pattern ai.models.generateContent not found, checking alternatives...');
+      // Fallback for different SDK versions if encountered
+      const modelName = "gemini-3-flash-preview";
+      if (typeof (ai as any).getGenerativeModel === 'function') {
+        const model = (ai as any).getGenerativeModel({ model: modelName });
+        const result = await model.generateContent([
+          { inlineData: { data: buffer.toString('base64'), mimeType: 'application/pdf' } },
+          { text: prompt }
+        ]);
+        response = await result.response;
+      } else {
+        throw new Error("No se pudo encontrar un método válido en el SDK de Gemini para generar contenido.");
       }
-    });
+    }
 
     const text = response.text;
     console.log('[GeminiService] Crudo:', text?.substring(0, 100));
