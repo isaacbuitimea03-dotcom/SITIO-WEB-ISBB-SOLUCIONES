@@ -46,10 +46,9 @@ async function startServer() {
     });
   });
 
-  // API Routes - Defined at the top level of the app for maximum priority
-  app.post('/api/analyze-xml', upload.array('files'), (req: Request, res: Response) => {
+  app.post(['/api/analyze-xml', '/api/analyze-xml/'], upload.array('files'), (req: Request, res: Response) => {
     const timestamp = new Date().toISOString();
-    console.log(`[${timestamp}] [API] analyze-xml start`);
+    console.log(`[${timestamp}] [POST] /api/analyze-xml`);
     try {
       const files = (req as MulterRequest).files as Express.Multer.File[];
       if (!files || files.length === 0) {
@@ -73,50 +72,54 @@ async function startServer() {
         }
       });
 
-      res.json(results);
+      res.status(200).json(results);
     } catch (error: any) {
-      console.error('[API] analyze-xml error:', error);
+      console.error('[API XML ERROR]', error);
       res.status(500).json({ error: error.message });
     }
   });
 
   app.post(['/api/analyze-bank-statement', '/api/analyze-bank-statement/'], upload.single('file'), async (req: Request, res: Response) => {
     const timestamp = new Date().toISOString();
-    console.log(`[${timestamp}] [API] analyze-bank-statement start`);
+    console.log(`[${timestamp}] [POST] /api/analyze-bank-statement`);
     try {
       if (!req.file) {
-        console.warn('[API] No file provided');
         return res.status(400).json({ error: 'No se subió ningún archivo' });
       }
 
       const file = req.file;
-      console.log(`[API] Processing: ${file.originalname} (${file.size} bytes)`);
+      console.log(`[${timestamp}] Analizando PDF: ${file.originalname} (${file.size} bytes)`);
       
       const transactions = await extractTransactionsFromPDF(file.buffer);
-      console.log(`[API] Extracted ${transactions.length} transactions`);
+      console.log(`[${timestamp}] Éxito: ${transactions.length} movimientos`);
 
-      res.json({
+      res.status(200).json({
         filename: file.originalname,
         transactions,
         status: 'success'
       });
     } catch (error: any) {
-      console.error("[API] Error in analyze-bank-statement:", error);
+      console.error("[API PDF ERROR]", error);
       res.status(500).json({ 
-        error: error.message || 'Error interno del servidor al procesar el PDF',
+        error: error.message || 'Error interno al procesar el PDF',
         stack: process.env.NODE_ENV !== 'production' ? error.stack : undefined
       });
     }
   });
 
-  // Health check - accessible and fast
+  // Health check
   app.get('/api/health', (req, res) => {
-    res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
+    res.status(200).json({ 
+      status: 'ok', 
+      node_env: process.env.NODE_ENV,
+      server_time: new Date().toISOString()
+    });
   });
 
-  // Catch-all for other /api routes
+  // Catch-all for any other /api route to return JSON 404
   app.all('/api/*', (req, res) => {
-    console.warn(`[API 404] ${req.method} ${req.url}`);
+    const timestamp = new Date().toISOString();
+    console.warn(`[${timestamp}] [API 404] ${req.method} ${req.url}`);
     res.status(404).json({ 
       error: 'Endpoint de API no encontrado', 
       method: req.method, 

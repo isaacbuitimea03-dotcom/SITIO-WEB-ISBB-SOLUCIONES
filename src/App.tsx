@@ -654,7 +654,7 @@ export default function App() {
           </p>
           <div className="w-12 h-1 bg-wheat mx-auto my-8 rounded-full opacity-30" />
           <p className="text-white/20 text-[10px] font-medium tracking-wider">
-            © {new Date().getFullYear()} ISBB SOLUCIONES - Plataforma de análisis técnico de CFDIs SAT v3.3/4.0
+            © {new Date().getFullYear()} ISBB SOLUCIONES - v1.3 PROD Build 23:59
           </p>
         </div>
       </footer>
