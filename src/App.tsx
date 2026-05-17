@@ -95,7 +95,7 @@ export default function App() {
     const file = e.target.files?.[0];
     if (!file) return;
     
-    const apiUrl = '/api/analyze-bank-statement';
+    const apiUrl = '/api/analyze-pdf-bank';
     console.log('Initiating bank analysis call to:', apiUrl);
     setLoading(true);
     const formData = new FormData();
@@ -654,7 +654,7 @@ export default function App() {
           </p>
           <div className="w-12 h-1 bg-wheat mx-auto my-8 rounded-full opacity-30" />
           <p className="text-white/20 text-[10px] font-medium tracking-wider">
-            © {new Date().getFullYear()} ISBB SOLUCIONES - v1.3 PROD Build 23:59
+            © {new Date().getFullYear()} ISBB SOLUCIONES - v1.4 PROD FINAL 00:08
           </p>
         </div>
       </footer>

@@ -41,18 +41,19 @@ async function startServer() {
   app.get('/api/health', (req, res) => {
     res.status(200).json({ 
       status: 'ok', 
-      deployment: 'isbb-v2',
-      time: new Date().toISOString() 
+      deployment: 'isbb-v3-final',
+      timestamp: new Date().toISOString() 
     });
   });
 
-  app.post(['/api/analyze-xml', '/api/analyze-xml/'], upload.array('files'), (req: Request, res: Response) => {
+  // Explicit POST route for XML
+  app.post('/api/analyze-xml', upload.array('files'), (req: Request, res: Response) => {
     const timestamp = new Date().toISOString();
-    console.log(`[${timestamp}] [POST] /api/analyze-xml`);
+    console.log(`[${timestamp}] [API] XML Processing`);
     try {
       const files = (req as MulterRequest).files as Express.Multer.File[];
       if (!files || files.length === 0) {
-        return res.status(400).json({ error: 'No se subieron archivos' });
+        return res.status(400).json({ error: 'No se subieron archivos XML' });
       }
 
       const results = files.map(file => {
@@ -79,19 +80,21 @@ async function startServer() {
     }
   });
 
-  app.post(['/api/analyze-bank-statement', '/api/analyze-bank-statement/'], upload.single('file'), async (req: Request, res: Response) => {
+  // Explicit POST route for PDF - Re-named slightly for cache busting
+  app.post('/api/analyze-pdf-bank', upload.single('file'), async (req: Request, res: Response) => {
     const timestamp = new Date().toISOString();
-    console.log(`[${timestamp}] [POST] /api/analyze-bank-statement`);
+    console.log(`[${timestamp}] [API] PDF Processing START`);
     try {
       if (!req.file) {
-        return res.status(400).json({ error: 'No se subió ningún archivo' });
+        console.warn('[API] Missing file in request body');
+        return res.status(400).json({ error: 'No se subió ningún archivo PDF' });
       }
 
       const file = req.file;
-      console.log(`[${timestamp}] Analizando PDF: ${file.originalname} (${file.size} bytes)`);
+      console.log(`[${timestamp}] Analizando: ${file.originalname} (${file.size} bytes)`);
       
       const transactions = await extractTransactionsFromPDF(file.buffer);
-      console.log(`[${timestamp}] Éxito: ${transactions.length} movimientos`);
+      console.log(`[${timestamp}] ÉXITO: ${transactions.length} movimientos encontrados`);
 
       res.status(200).json({
         filename: file.originalname,
@@ -101,29 +104,32 @@ async function startServer() {
     } catch (error: any) {
       console.error("[API PDF ERROR]", error);
       res.status(500).json({ 
-        error: error.message || 'Error interno al procesar el PDF',
-        stack: process.env.NODE_ENV !== 'production' ? error.stack : undefined
+        error: error.message || 'Error interno al procesar el PDF con AI',
+        details: process.env.NODE_ENV !== 'production' ? error.stack : undefined
       });
     }
   });
 
-  // Health check
-  app.get('/api/health', (req, res) => {
-    res.status(200).json({ 
-      status: 'ok', 
-      node_env: process.env.NODE_ENV,
-      server_time: new Date().toISOString()
-    });
+  // Route inspector for debugging 404s
+  app.get('/api/debug-routes', (req, res) => {
+    const routes = app._router.stack
+      .filter((r: any) => r.route)
+      .map((r: any) => ({
+        path: r.route.path,
+        methods: Object.keys(r.route.methods)
+      }));
+    res.json({ routes });
   });
 
-  // Catch-all for any other /api route to return JSON 404
+  // Catch-all for any other /api route
   app.all('/api/*', (req, res) => {
     const timestamp = new Date().toISOString();
-    console.warn(`[${timestamp}] [API 404] ${req.method} ${req.url}`);
+    console.warn(`[${timestamp}] [API 404 NOT FOUND] ${req.method} ${req.url}`);
     res.status(404).json({ 
-      error: 'Endpoint de API no encontrado', 
+      error: 'Endpoint de API no encontrado en el servidor Express', 
       method: req.method, 
-      url: req.url 
+      url: req.url,
+      server_time: timestamp
     });
   });
 
