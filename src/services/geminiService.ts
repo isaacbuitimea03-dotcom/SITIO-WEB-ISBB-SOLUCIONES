@@ -51,70 +51,48 @@ export async function extractTransactionsFromPDF(buffer: Buffer): Promise<BankTr
   `;
 
   try {
-    console.log('[GeminiService] Llamando a Gemini API (gemini-3-flash-preview)...');
-    console.log('[GeminiService] SDK Keys:', Object.keys(ai));
-    if (ai.models) console.log('[GeminiService] Models Keys:', Object.keys(ai.models));
+    console.log('[GeminiService] Llamando a Gemini API (gemini-1.5-flash)...');
     
-    // Attempt standard call with fallback
-    let response;
-    if (ai.models && typeof ai.models.generateContent === 'function') {
-      response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                data: buffer.toString('base64'),
-                mimeType: 'application/pdf'
-              }
+    const model = ai.getGenerativeModel({ 
+      model: "gemini-1.5-flash",
+      generationConfig: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              fecha: { type: Type.STRING },
+              descripcion: { type: Type.STRING },
+              monto: { type: Type.NUMBER },
+              tipo: { type: Type.STRING, description: "Cargo o Abono" },
+              referencia: { type: Type.STRING },
             },
-            { text: prompt }
-          ]
-        },
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                fecha: { type: Type.STRING },
-                descripcion: { type: Type.STRING },
-                monto: { type: Type.NUMBER },
-                tipo: { type: Type.STRING, description: "Cargo o Abono" },
-                referencia: { type: Type.STRING },
-              },
-              required: ['fecha', 'descripcion', 'monto', 'tipo'],
-            },
+            required: ['fecha', 'descripcion', 'monto', 'tipo'],
           },
-        }
-      });
-    } else {
-      console.warn('[GeminiService] Pattern ai.models.generateContent not found, checking alternatives...');
-      // Fallback for different SDK versions if encountered
-      const modelName = "gemini-3-flash-preview";
-      if (typeof (ai as any).getGenerativeModel === 'function') {
-        const model = (ai as any).getGenerativeModel({ model: modelName });
-        const result = await model.generateContent([
-          { inlineData: { data: buffer.toString('base64'), mimeType: 'application/pdf' } },
-          { text: prompt }
-        ]);
-        response = await result.response;
-      } else {
-        throw new Error("No se pudo encontrar un método válido en el SDK de Gemini para generar contenido.");
+        },
       }
-    }
+    });
 
-    const text = response.text;
+    const result = await model.generateContent([
+      {
+        inlineData: {
+          data: buffer.toString('base64'),
+          mimeType: 'application/pdf'
+        }
+      },
+      { text: prompt }
+    ]);
+
+    const res = await result.response;
+    const text = res.text();
     console.log('[GeminiService] Crudo:', text?.substring(0, 100));
     
     if (!text) {
       throw new Error("La IA no generó texto en la respuesta.");
     }
 
-    // Clean markdown if present
-    const cleanJson = text.replace(/```json\n?|```/g, '').trim();
-    const data = JSON.parse(cleanJson);
+    const data = JSON.parse(text);
     console.log('[GeminiService] Parseado con éxito:', Array.isArray(data) ? data.length : 'no es array');
     return data;
   } catch (error: any) {
