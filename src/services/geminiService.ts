@@ -86,12 +86,12 @@ export async function extractTransactionsFromPDF(buffer: Buffer): Promise<BankTr
     });
 
     const text = response.text;
-    console.log('[GeminiService] Respuesta recibida:', text?.substring(0, 100));
-    
     if (!text) {
+      console.warn('[GeminiService] Respuesta sin texto. Response:', JSON.stringify(response));
       throw new Error("La IA no generó una respuesta válida.");
     }
-
+    
+    console.log('[GeminiService] Respuesta cruda (primeros 50 chars):', text.substring(0, 50));
     const data = JSON.parse(text);
     console.log('[GeminiService] Transacciones extraídas:', Array.isArray(data) ? data.length : 'Error');
     return data;

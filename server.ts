@@ -1,22 +1,25 @@
 import express, { Request, Response } from 'express';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import multer from 'multer';
 import { createServer as createViteServer } from 'vite';
-import { parseCFDI } from './src/lib/xmlParser';
-import { extractTransactionsFromPDF } from './src/services/geminiService';
+import { parseCFDI } from './src/lib/xmlParser.js';
+import { extractTransactionsFromPDF } from './src/services/geminiService.js';
 import cors from 'cors';
 import * as dotenv from 'dotenv';
 
 // Load environment variables
 dotenv.config();
 
-console.log('--- SERVER INITIATING ---');
-console.log('Current working directory:', process.cwd());
-console.log('GEMINI_API_KEY present:', !!process.env.GEMINI_API_KEY);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+console.log('--- ISBB SERVER STARTING ---');
+console.log('Mode:', process.env.NODE_ENV);
 
 const upload = multer({ 
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
+  limits: { fileSize: 15 * 1024 * 1024 } // 15MB limit
 });
 
 interface MulterRequest extends Request {
@@ -26,37 +29,32 @@ interface MulterRequest extends Request {
 const app = express();
 const PORT = 3000;
 
-// Use CORS and JSON parsing
 app.use(cors());
 app.use(express.json());
 
-// Log all requests with more detail
+// Log every single request for maximum visibility
 app.use((req, res, next) => {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] Incoming Request: ${req.method} ${req.url}`);
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
   next();
 });
 
-// Health check
+// Health check endpoint
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'ok', 
-    deployment: 'isbb-v9-stable',
-    time: new Date().toISOString()
+    version: '2.5.1',
+    env: process.env.NODE_ENV || 'dev',
+    key: !!process.env.GEMINI_API_KEY
   });
-});
-
-app.get('/api/ping', (req, res) => {
-  res.send('pong');
 });
 
 // XML Analysis Route
 app.post('/api/analyze-xml', upload.array('files'), (req: Request, res: Response) => {
-  console.log('[API] XML Request Received');
+  console.log('[XML] Start processing');
   try {
     const files = (req as MulterRequest).files as Express.Multer.File[];
     if (!files || files.length === 0) {
-      return res.status(400).json({ error: 'No files uploaded' });
+      return res.status(400).json({ error: 'No se subieron archivos XML' });
     }
 
     const results = files.map(file => {
@@ -68,30 +66,31 @@ app.post('/api/analyze-xml', upload.array('files'), (req: Request, res: Response
           status: 'success'
         };
       } catch (error: any) {
+        console.error(`[XML] Error in ${file.originalname}:`, error);
         return { filename: file.originalname, error: error.message, status: 'error' };
       }
     });
 
-    res.status(200).json(results);
+    res.json(results);
   } catch (error: any) {
-    console.error('[API] XML Error:', error);
-    res.status(500).json({ error: error.message });
+    console.error('[XML] Global error:', error);
+    res.status(500).json({ error: 'Error interno al procesar XML', details: error.message });
   }
 });
 
-// PDF Bank Analysis Route - sequential for robustness
+// PDF Analysis Route
 app.post('/api/analyze-pdf-bank', upload.array('files'), async (req: Request, res: Response) => {
-  console.log('[API] multi-PDF Request Received');
+  console.log('[PDF] Start processing');
   try {
     const files = (req as MulterRequest).files as Express.Multer.File[];
     if (!files || files.length === 0) {
-      return res.status(400).json({ error: 'No PDF files uploaded' });
+      return res.status(400).json({ error: 'No se subieron archivos PDF' });
     }
 
     const results = [];
     for (const file of files) {
       try {
-        console.log(`[API] Processing PDF sequentially: ${file.originalname}`);
+        console.log(`[PDF] Analyzing: ${file.originalname}`);
         const transactions = await extractTransactionsFromPDF(file.buffer);
         results.push({
           filename: file.originalname,
@@ -99,7 +98,7 @@ app.post('/api/analyze-pdf-bank', upload.array('files'), async (req: Request, re
           status: 'success'
         });
       } catch (error: any) {
-        console.error(`[API] Error in ${file.originalname}:`, error);
+        console.error(`[PDF] Error in ${file.originalname}:`, error);
         results.push({
           filename: file.originalname,
           error: error.message,
@@ -109,55 +108,39 @@ app.post('/api/analyze-pdf-bank', upload.array('files'), async (req: Request, re
       }
     }
 
-    res.status(200).json(results);
+    res.json(results);
   } catch (error: any) {
-    console.error('[API] Global PDF Error:', error);
-    res.status(500).json({ error: error.message });
+    console.error('[PDF] Global error:', error);
+    res.status(500).json({ error: 'Error fatal en servidor PDF', details: error.message });
   }
 });
 
-// Route inspector
-app.get('/api/debug-routes', (req, res) => {
-  const routes = app._router.stack
-    .filter((r: any) => r.route)
-    .map((r: any) => ({
-      path: r.route.path,
-      methods: Object.keys(r.route.methods)
-    }));
-  res.json({ routes });
-});
-
-async function startServer() {
-  console.log('Finalizing server setup...');
-
-  // Vite middleware for development
+async function start() {
   if (process.env.NODE_ENV !== 'production') {
+    console.log('Starting VITE dev middleware...');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    // In production (Cloud Run), serve static files from dist
-    const distPath = path.resolve(process.cwd(), 'dist');
+    console.log('Production mode: Serving static files');
+    const distPath = path.resolve(__dirname, 'dist');
     app.use(express.static(distPath));
-    
     app.get('*', (req, res) => {
-      if (req.url.startsWith('/api/')) {
-        return res.status(404).json({ error: 'API endpoint not found' });
-      }
+      if (req.url.startsWith('/api/')) return res.status(404).json({ error: 'API route not found' });
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server is listening on 0.0.0.0:${PORT}`);
+    console.log(`>>> SERVER RUNNING ON PORT ${PORT} <<<`);
   });
 }
 
-// Start the server
-startServer().catch((err) => {
-  console.error('FAILED TO START SERVER:', err);
+start().catch(err => {
+  console.error('SERVER FAILED TO START:', err);
 });
 
 export default app;
+

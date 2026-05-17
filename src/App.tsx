@@ -47,6 +47,22 @@ export default function App() {
   const [filter, setFilter] = useState('');
   const [activeTool, setActiveTool] = useState<'xml' | 'pdf'>('xml');
   const [bankResults, setBankResults] = useState<AnalysisResultPDF[]>([]);
+  const [serverHealth, setServerHealth] = useState<'checking' | 'ok' | 'fail'>('checking');
+
+  React.useEffect(() => {
+    const checkServer = async () => {
+      try {
+        const res = await fetch('/api/health');
+        if (res.ok) setServerHealth('ok');
+        else setServerHealth('fail');
+      } catch (e) {
+        setServerHealth('fail');
+      }
+    };
+    const timer = setTimeout(checkServer, 1000);
+    return () => clearTimeout(timer);
+  }, []);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pdfInputRef = useRef<HTMLInputElement>(null);
 
@@ -696,7 +712,7 @@ export default function App() {
           </p>
           <div className="w-12 h-1 bg-wheat mx-auto my-8 rounded-full opacity-30" />
           <p className="text-white/20 text-[10px] font-medium tracking-wider">
-            © {new Date().getFullYear()} ISBB SOLUCIONES - v2.5 CACHE-CLEAN 01:50
+            © {new Date().getFullYear()} ISBB SOLUCIONES - v2.7 STABLE {serverHealth === 'ok' ? '🟢 ONLINE' : serverHealth === 'fail' ? '🔴 OFFLINE' : '⚪ CONNECTING...'}
           </p>
         </div>
       </footer>
