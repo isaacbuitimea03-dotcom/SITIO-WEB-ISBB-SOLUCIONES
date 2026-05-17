@@ -1,14 +1,14 @@
 import { GoogleGenAI, Type } from "@google/genai";
 
-let genAI: GoogleGenAI | null = null;
+let aiClient: GoogleGenAI | null = null;
 
-function getGenAI() {
-  if (!genAI) {
+function getAI() {
+  if (!aiClient) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
       throw new Error("La clave de API de Gemini (GEMINI_API_KEY) no está configurada.");
     }
-    genAI = new GoogleGenAI({
+    aiClient = new GoogleGenAI({
       apiKey: apiKey,
       httpOptions: {
         headers: {
@@ -17,7 +17,7 @@ function getGenAI() {
       }
     });
   }
-  return genAI;
+  return aiClient;
 }
 
 export interface BankTransaction {
@@ -30,7 +30,7 @@ export interface BankTransaction {
 
 export async function extractTransactionsFromPDF(buffer: Buffer): Promise<BankTransaction[]> {
   console.log('[GeminiService] Analizando PDF buffer. Tamaño:', buffer.length, 'bytes');
-  const ai = getGenAI();
+  const ai = getAI();
   
   const prompt = `
     Analiza este estado de cuenta bancario y extrae TODOS los movimientos o transacciones en una lista estructurada (JSON).
@@ -47,15 +47,24 @@ export async function extractTransactionsFromPDF(buffer: Buffer): Promise<BankTr
     1. No omitas ningún movimiento.
     2. Identifica correctamente la columna de Cargos (Retiros) y Abonos (Depósitos).
     3. Si el documento tiene varias secciones (ej. compras, pagos de tarjeta, transferencias), inclúyelas todas.
-    4. Responde EXCLUSIVAMENTE con el arreglo JSON solicitado.
+    4. Responde EXCLUSIVAMENTE con el arreglo JSON solicitado. No incluyas markdown o explicaciones.
   `;
 
   try {
-    console.log('[GeminiService] Llamando a Gemini API (gemini-1.5-flash)...');
+    console.log('[GeminiService] Llamando a Gemini API (gemini-3-flash-preview)...');
     
-    const model = ai.getGenerativeModel({ 
-      model: "gemini-1.5-flash",
-      generationConfig: {
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: [
+        {
+          inlineData: {
+            data: buffer.toString('base64'),
+            mimeType: 'application/pdf'
+          }
+        },
+        { text: prompt }
+      ],
+      config: {
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.ARRAY,
@@ -74,29 +83,18 @@ export async function extractTransactionsFromPDF(buffer: Buffer): Promise<BankTr
       }
     });
 
-    const result = await model.generateContent([
-      {
-        inlineData: {
-          data: buffer.toString('base64'),
-          mimeType: 'application/pdf'
-        }
-      },
-      { text: prompt }
-    ]);
-
-    const res = await result.response;
-    const text = res.text();
-    console.log('[GeminiService] Crudo:', text?.substring(0, 100));
+    const text = response.text;
+    console.log('[GeminiService] Respuesta recibida:', text?.substring(0, 100));
     
     if (!text) {
-      throw new Error("La IA no generó texto en la respuesta.");
+      throw new Error("La IA no generó una respuesta válida.");
     }
 
     const data = JSON.parse(text);
-    console.log('[GeminiService] Parseado con éxito:', Array.isArray(data) ? data.length : 'no es array');
+    console.log('[GeminiService] Transacciones extraídas:', Array.isArray(data) ? data.length : 'Error');
     return data;
   } catch (error: any) {
     console.error("[GeminiService] Detalle del Error:", error);
-    throw new Error(`Falla en IA: ${error.message}`);
+    throw new Error(`Falla en IA: ${error.message || 'Error desconocido'}`);
   }
 }

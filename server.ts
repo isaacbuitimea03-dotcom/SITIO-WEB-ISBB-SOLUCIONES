@@ -5,7 +5,10 @@ import { createServer as createViteServer } from 'vite';
 import { parseCFDI } from './src/lib/xmlParser';
 import { extractTransactionsFromPDF } from './src/services/geminiService';
 import cors from 'cors';
-import { GoogleGenAI } from '@google/genai';
+import * as dotenv from 'dotenv';
+
+// Load environment variables
+dotenv.config();
 
 console.log('--- SERVER INITIATING ---');
 console.log('Current working directory:', process.cwd());
