@@ -92,7 +92,9 @@ export async function extractTransactionsFromPDF(buffer: Buffer): Promise<BankTr
       throw new Error("La IA no generó texto en la respuesta.");
     }
 
-    const data = JSON.parse(text);
+    // Clean markdown if present
+    const cleanJson = text.replace(/```json\n?|```/g, '').trim();
+    const data = JSON.parse(cleanJson);
     console.log('[GeminiService] Parseado con éxito:', Array.isArray(data) ? data.length : 'no es array');
     return data;
   } catch (error: any) {

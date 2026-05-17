@@ -12,7 +12,7 @@ import {
   Search,
   Filter
 } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion, AnimatePresence } from 'framer-motion';
 import * as XLSX from 'xlsx';
 import { format } from 'date-fns';
 import { CFDIData } from './lib/xmlParser';
@@ -696,7 +696,7 @@ export default function App() {
           </p>
           <div className="w-12 h-1 bg-wheat mx-auto my-8 rounded-full opacity-30" />
           <p className="text-white/20 text-[10px] font-medium tracking-wider">
-            © {new Date().getFullYear()} ISBB SOLUCIONES - v2.2 PROD FIX 01:00
+            © {new Date().getFullYear()} ISBB SOLUCIONES - v2.3 PROD FINAL FIX 01:05
           </p>
         </div>
       </footer>
