@@ -55,15 +55,17 @@ export async function extractTransactionsFromPDF(buffer: Buffer): Promise<BankTr
     
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
-      contents: [
-        {
-          inlineData: {
-            data: buffer.toString('base64'),
-            mimeType: 'application/pdf'
-          }
-        },
-        { text: prompt }
-      ],
+      contents: {
+        parts: [
+          {
+            inlineData: {
+              data: buffer.toString('base64'),
+              mimeType: 'application/pdf'
+            }
+          },
+          { text: prompt }
+        ]
+      },
       config: {
         responseMimeType: "application/json",
         responseSchema: {

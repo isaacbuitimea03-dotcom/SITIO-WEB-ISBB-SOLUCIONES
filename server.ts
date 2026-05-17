@@ -79,7 +79,7 @@ app.post('/api/analyze-xml', upload.array('files'), (req: Request, res: Response
   }
 });
 
-// PDF Bank Analysis Route - Multi-file support
+// PDF Bank Analysis Route - sequential for robustness
 app.post('/api/analyze-pdf-bank', upload.array('files'), async (req: Request, res: Response) => {
   console.log('[API] multi-PDF Request Received');
   try {
@@ -88,27 +88,26 @@ app.post('/api/analyze-pdf-bank', upload.array('files'), async (req: Request, re
       return res.status(400).json({ error: 'No PDF files uploaded' });
     }
 
-    const results = await Promise.all(
-      files.map(async file => {
-        try {
-          console.log(`[API] Processing PDF: ${file.originalname}`);
-          const transactions = await extractTransactionsFromPDF(file.buffer);
-          return {
-            filename: file.originalname,
-            transactions,
-            status: 'success'
-          };
-        } catch (error: any) {
-          console.error(`[API] Error in ${file.originalname}:`, error);
-          return {
-            filename: file.originalname,
-            error: error.message,
-            status: 'error',
-            transactions: []
-          };
-        }
-      })
-    );
+    const results = [];
+    for (const file of files) {
+      try {
+        console.log(`[API] Processing PDF sequentially: ${file.originalname}`);
+        const transactions = await extractTransactionsFromPDF(file.buffer);
+        results.push({
+          filename: file.originalname,
+          transactions,
+          status: 'success'
+        });
+      } catch (error: any) {
+        console.error(`[API] Error in ${file.originalname}:`, error);
+        results.push({
+          filename: file.originalname,
+          error: error.message,
+          status: 'error',
+          transactions: []
+        });
+      }
+    }
 
     res.status(200).json(results);
   } catch (error: any) {
@@ -132,14 +131,14 @@ async function startServer() {
   console.log('Finalizing server setup...');
 
   // Vite middleware for development
-  if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
+  if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    // In production (Cloud Run), serve static files
+    // In production (Cloud Run), serve static files from dist
     const distPath = path.resolve(process.cwd(), 'dist');
     app.use(express.static(distPath));
     
@@ -151,17 +150,14 @@ async function startServer() {
     });
   }
 
-  // Only listen if not in a serverless environment like Vercel (optional, Vercel ignores listen)
-  if (!process.env.VERCEL) {
-    app.listen(PORT, '0.0.0.0', () => {
-      console.log(`Server is listening on 0.0.0.0:${PORT}`);
-    });
-  }
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server is listening on 0.0.0.0:${PORT}`);
+  });
 }
 
-// Check if we are running directly (not imported as a module)
-if (import.meta.url === `file://${process.argv[1]}` || process.env.NODE_ENV === 'production') {
-  startServer().catch(console.error);
-}
+// Start the server
+startServer().catch((err) => {
+  console.error('FAILED TO START SERVER:', err);
+});
 
 export default app;
