@@ -37,23 +37,27 @@ async function startServer() {
     next();
   });
 
-  // Health check - Very simple
+  // Health check and ping
   app.get('/api/health', (req, res) => {
-    res.status(200).json({ 
+    res.json({ 
       status: 'ok', 
-      deployment: 'isbb-v3-final',
-      timestamp: new Date().toISOString() 
+      deployment: 'isbb-v6-stable', 
+      time: new Date().toISOString(),
+      node: process.version
     });
   });
 
-  // Explicit POST route for XML
+  app.get('/api/ping', (req, res) => {
+    res.send('pong');
+  });
+
+  // XML Analysis Route
   app.post('/api/analyze-xml', upload.array('files'), (req: Request, res: Response) => {
-    const timestamp = new Date().toISOString();
-    console.log(`[${timestamp}] [API] XML Processing`);
+    console.log('[API] XML Request Received');
     try {
       const files = (req as MulterRequest).files as Express.Multer.File[];
       if (!files || files.length === 0) {
-        return res.status(400).json({ error: 'No se subieron archivos XML' });
+        return res.status(400).json({ error: 'No files uploaded' });
       }
 
       const results = files.map(file => {
@@ -65,48 +69,52 @@ async function startServer() {
             status: 'success'
           };
         } catch (error: any) {
-          return {
-            filename: file.originalname,
-            error: error.message,
-            status: 'error'
-          };
+          return { filename: file.originalname, error: error.message, status: 'error' };
         }
       });
 
       res.status(200).json(results);
     } catch (error: any) {
-      console.error('[API XML ERROR]', error);
+      console.error('[API] XML Error:', error);
       res.status(500).json({ error: error.message });
     }
   });
 
-  // Explicit POST route for PDF - Re-named slightly for cache busting
-  app.post('/api/analyze-pdf-bank', upload.single('file'), async (req: Request, res: Response) => {
-    const timestamp = new Date().toISOString();
-    console.log(`[${timestamp}] [API] PDF Processing START`);
+  // PDF Bank Analysis Route - Multi-file support
+  app.post('/api/analyze-pdf-bank', upload.array('files'), async (req: Request, res: Response) => {
+    console.log('[API] multi-PDF Request Received');
     try {
-      if (!req.file) {
-        console.warn('[API] Missing file in request body');
-        return res.status(400).json({ error: 'No se subió ningún archivo PDF' });
+      const files = (req as MulterRequest).files as Express.Multer.File[];
+      if (!files || files.length === 0) {
+        return res.status(400).json({ error: 'No PDF files uploaded' });
       }
 
-      const file = req.file;
-      console.log(`[${timestamp}] Analizando: ${file.originalname} (${file.size} bytes)`);
-      
-      const transactions = await extractTransactionsFromPDF(file.buffer);
-      console.log(`[${timestamp}] ÉXITO: ${transactions.length} movimientos encontrados`);
+      const results = await Promise.all(
+        files.map(async file => {
+          try {
+            console.log(`[API] Processing PDF: ${file.originalname}`);
+            const transactions = await extractTransactionsFromPDF(file.buffer);
+            return {
+              filename: file.originalname,
+              transactions,
+              status: 'success'
+            };
+          } catch (error: any) {
+            console.error(`[API] Error in ${file.originalname}:`, error);
+            return {
+              filename: file.originalname,
+              error: error.message,
+              status: 'error',
+              transactions: []
+            };
+          }
+        })
+      );
 
-      res.status(200).json({
-        filename: file.originalname,
-        transactions,
-        status: 'success'
-      });
+      res.status(200).json(results);
     } catch (error: any) {
-      console.error("[API PDF ERROR]", error);
-      res.status(500).json({ 
-        error: error.message || 'Error interno al procesar el PDF con AI',
-        details: process.env.NODE_ENV !== 'production' ? error.stack : undefined
-      });
+      console.error('[API] Global PDF Error:', error);
+      res.status(500).json({ error: error.message });
     }
   });
 

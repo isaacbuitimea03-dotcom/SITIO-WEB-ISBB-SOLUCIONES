@@ -32,32 +32,48 @@ interface AnalysisResult {
   status: 'success' | 'error';
 }
 
+interface AnalysisResultPDF {
+  filename: string;
+  transactions: BankTransaction[];
+  error?: string;
+  status: 'success' | 'error';
+}
+
 export default function App() {
-  const [files, setFiles] = useState<File[]>([]);
+  const [xmlFiles, setXmlFiles] = useState<File[]>([]);
+  const [pdfFiles, setPdfFiles] = useState<File[]>([]);
   const [results, setResults] = useState<AnalysisResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState('');
   const [activeTool, setActiveTool] = useState<'xml' | 'pdf'>('xml');
-  const [bankResults, setBankResults] = useState<{ filename: string; transactions: BankTransaction[] } | null>(null);
+  const [bankResults, setBankResults] = useState<AnalysisResultPDF[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pdfInputRef = useRef<HTMLInputElement>(null);
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>, type: 'xml' | 'pdf') => {
     if (e.target.files) {
-      setFiles(prev => [...prev, ...Array.from(e.target.files || [])]);
+      if (type === 'xml') {
+        setXmlFiles(prev => [...prev, ...Array.from(e.target.files || [])]);
+      } else {
+        setPdfFiles(prev => [...prev, ...Array.from(e.target.files || [])]);
+      }
     }
   };
 
-  const removeFile = (index: number) => {
-    setFiles(prev => prev.filter((_, i) => i !== index));
+  const removeFile = (index: number, type: 'xml' | 'pdf') => {
+    if (type === 'xml') {
+      setXmlFiles(prev => prev.filter((_, i) => i !== index));
+    } else {
+      setPdfFiles(prev => prev.filter((_, i) => i !== index));
+    }
   };
 
   const uploadAndAnalyze = async () => {
-    if (files.length === 0) return;
+    if (xmlFiles.length === 0) return;
     setLoading(true);
     
     const formData = new FormData();
-    files.forEach(file => formData.append('files', file));
+    xmlFiles.forEach(file => formData.append('files', file));
 
     try {
       const response = await fetch('/api/analyze-xml', {
@@ -91,67 +107,51 @@ export default function App() {
     }
   };
 
-  const uploadAndAnalyzeBank = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const uploadAndAnalyzeBank = async () => {
+    if (pdfFiles.length === 0) return;
     
-    const apiUrl = '/api/analyze-pdf-bank';
-    console.log('Initiating bank analysis call to:', apiUrl);
     setLoading(true);
     const formData = new FormData();
-    formData.append('file', file);
+    pdfFiles.forEach(file => formData.append('files', file));
 
     try {
-      const response = await fetch(apiUrl, {
+      const response = await fetch('/api/analyze-pdf-bank', {
         method: 'POST',
         body: formData,
       });
 
-      console.log('Received response from API:', response.status);
-      const contentType = response.headers.get('content-type');
       if (!response.ok) {
-        let errorMessage = `Error del servidor (${response.status}) al procesar PDF`;
-        
-        try {
-          if (contentType && contentType.includes('application/json')) {
-            const err = await response.json();
-            console.error('API Error JSON:', err);
-            errorMessage = err.error || err.message || errorMessage;
-          } else {
-            const text = await response.text();
-            console.error('Server returned non-json error:', text.substring(0, 500));
-            if (response.status === 404) {
-              errorMessage = `La ruta de análisis (404) no fue encontrada. Servidor respondió: ${text.substring(0, 100)}`;
-            } else {
-              errorMessage = `Error ${response.status}: ${text.substring(0, 100)}`;
-            }
-          }
-        } catch (e) {
-          console.error('Error parsing error response:', e);
-        }
-        
-        throw new Error(errorMessage);
+        const text = await response.text();
+        throw new Error(`Error ${response.status}: ${text.substring(0, 100)}`);
       }
 
       const data = await response.json();
-      console.log('Bank analysis success:', data);
       setBankResults(data);
     } catch (error: any) {
-      console.error('Error analyzing bank file:', error);
-      alert(error.message);
+      console.error('Final Bank Analysis Catch:', error);
+      alert(`Error al analizar PDF: ${error.message}`);
     } finally {
       setLoading(false);
-      if (e.target) e.target.value = '';
     }
   };
 
-  const exportBankToExcel = () => {
-    if (!bankResults || bankResults.transactions.length === 0) return;
+  const exportBankToExcel = (results: AnalysisResultPDF[]) => {
+    const allTransactions = results.flatMap(r => 
+      (r.transactions || []).map(tx => ({
+        'Archivo': r.filename,
+        ...tx
+      }))
+    );
 
-    const worksheet = XLSX.utils.json_to_sheet(bankResults.transactions);
+    if (allTransactions.length === 0) {
+      alert('No hay movimientos para exportar.');
+      return;
+    }
+
+    const worksheet = XLSX.utils.json_to_sheet(allTransactions);
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Movimientos');
-    XLSX.writeFile(workbook, `Movimientos_Bancarios_${format(new Date(), 'yyyyMMdd')}.xlsx`);
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Reporte Bancario');
+    XLSX.writeFile(workbook, `Reporte_Bancario_${format(new Date(), 'yyyyMMdd')}.xlsx`);
   };
 
   const exportToExcel = () => {
@@ -269,7 +269,10 @@ export default function App() {
               </button>
             </div>
             <button 
-              onClick={() => { setResults([]); setFiles([]); setBankResults(null); }}
+              onClick={() => { 
+                setResults([]); setXmlFiles([]); 
+                setBankResults([]); setPdfFiles([]); 
+              }}
               className="text-sm font-semibold text-wheat/80 hover:text-wheat transition-colors flex items-center gap-2"
             >
               <Trash2 className="w-4 h-4" />
@@ -306,26 +309,26 @@ export default function App() {
                   <input 
                     type="file" 
                     ref={fileInputRef} 
-                    onChange={handleFileChange} 
+                    onChange={(e) => handleFileChange(e, 'xml')} 
                     multiple 
                     accept=".xml" 
                     className="hidden" 
                   />
                 </div>
 
-                {files.length > 0 && (
+                {xmlFiles.length > 0 && (
                   <div className="mt-8 space-y-4">
                     <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-                      <span className="text-sm font-bold text-slate-500 uppercase tracking-wider">{files.length} seleccionados</span>
+                      <span className="text-sm font-bold text-slate-500 uppercase tracking-wider">{xmlFiles.length} seleccionados</span>
                     </div>
                     <div className="max-h-60 overflow-y-auto space-y-2 pr-2 custom-scrollbar">
-                      {files.map((file, i) => (
+                      {xmlFiles.map((file, i) => (
                         <div key={i} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl text-xs group border border-transparent hover:border-gold-200 hover:bg-white transition-all shadow-sm">
                           <div className="flex items-center gap-2 font-medium text-slate-600">
                             <FileText className="w-4 h-4 text-gold-500" />
                             <span className="truncate max-w-[180px]">{file.name}</span>
                           </div>
-                          <button onClick={() => removeFile(i)} className="text-slate-400 hover:text-red-500 transition-colors">
+                          <button onClick={() => removeFile(i, 'xml')} className="text-slate-400 hover:text-red-500 transition-colors">
                             <Trash2 className="w-4 h-4" />
                           </button>
                         </div>
@@ -355,7 +358,7 @@ export default function App() {
                 </h2>
                 
                 <p className="text-xs text-slate-500 mb-6 leading-relaxed">
-                  Utiliza <strong>IA Generativa</strong> para leer y extraer movimientos de estados de cuenta bancarios (PDF digitales).
+                  Utiliza <strong>IA Generativa</strong> para leer y extraer movimientos de estados de cuenta bancarios.
                 </p>
 
                 <div 
@@ -365,38 +368,63 @@ export default function App() {
                   <div className="bg-slate-100 p-5 rounded-2xl group-hover:scale-110 transition-transform relative z-10">
                     <Upload className="w-10 h-10 text-slate-400 group-hover:text-blue-600" />
                   </div>
-                  <p className="mt-5 text-sm font-bold text-slate-700 relative z-10">Cargar PDF Bancario</p>
+                  <p className="mt-5 text-sm font-bold text-slate-700 relative z-10">Cargar PDFs Bancarios</p>
                   <input 
                     type="file" 
                     ref={pdfInputRef} 
-                    onChange={uploadAndAnalyzeBank} 
+                    onChange={(e) => handleFileChange(e, 'pdf')} 
+                    multiple
                     accept=".pdf" 
                     className="hidden" 
                   />
-                  {loading && activeTool === 'pdf' && (
-                    <div className="absolute inset-0 bg-white/80 backdrop-blur-sm z-20 flex flex-col items-center justify-center p-6">
-                      <div className="w-10 h-10 border-4 border-blue-600/20 border-t-blue-600 rounded-full animate-spin mb-4" />
-                      <p className="text-xs font-black uppercase tracking-widest text-blue-700">Analizando con Inteligencia Artificial</p>
-                      <p className="text-[10px] text-blue-500 mt-2 font-medium text-center">Este proceso es exhaustivo y puede tardar entre 30 y 60 segundos dependiendo del tamaño del PDF.</p>
-                      <p className="text-[10px] text-blue-400 mt-1 uppercase tracking-tighter">Por favor no cierres la ventana</p>
-                    </div>
-                  )}
                 </div>
 
-                {bankResults && (
+                {pdfFiles.length > 0 && (
+                  <div className="mt-8 space-y-4">
+                    <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+                      <span className="text-sm font-bold text-slate-500 uppercase tracking-wider">{pdfFiles.length} archivos</span>
+                    </div>
+                    <div className="max-h-60 overflow-y-auto space-y-2 pr-2 custom-scrollbar">
+                      {pdfFiles.map((file, i) => (
+                        <div key={i} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl text-xs group border border-transparent hover:border-blue-200 hover:bg-white transition-all shadow-sm">
+                          <div className="flex items-center gap-2 font-medium text-slate-600">
+                            <FileText className="w-4 h-4 text-blue-500" />
+                            <span className="truncate max-w-[180px]">{file.name}</span>
+                          </div>
+                          <button onClick={() => removeFile(i, 'pdf')} className="text-slate-400 hover:text-red-500 transition-colors">
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                    <button 
+                      onClick={uploadAndAnalyzeBank}
+                      disabled={loading}
+                      className="w-full bg-blue-600 text-white font-bold py-4 rounded-2xl shadow-xl shadow-blue-200 hover:bg-blue-700 disabled:opacity-50 transition-all flex items-center justify-center gap-3 mt-6"
+                    >
+                      {loading ? (
+                        <div className="w-6 h-6 border-3 border-white/20 border-t-white rounded-full animate-spin" />
+                      ) : (
+                        <>PROCESAR PDFS CON IA <ChevronRight className="w-5 h-5" /></>
+                      )}
+                    </button>
+                  </div>
+                )}
+
+                {bankResults.length > 0 && (
                   <div className="mt-8">
                     <div className="bg-slate-900 rounded-2xl p-6 text-white overflow-hidden relative shadow-lg">
                       <h3 className="text-wheat text-[10px] font-black uppercase tracking-[0.2em] mb-4">Análisis Completado</h3>
                       <div className="space-y-4 relative z-10">
                         <div className="flex justify-between items-center text-sm">
-                          <span className="text-white/60">Transacciones:</span>
-                          <span className="font-black text-wheat">{bankResults.transactions.length}</span>
+                          <span className="text-white/60">Registros:</span>
+                          <span className="font-black text-wheat">{bankResults.length}</span>
                         </div>
                         <button 
-                          onClick={exportBankToExcel}
+                          onClick={() => exportBankToExcel(bankResults)}
                           className="w-full bg-wheat text-slate-900 py-3 rounded-xl font-black text-xs uppercase tracking-wider hover:bg-white transition-all flex items-center justify-center gap-2"
                         >
-                          <Download className="w-4 h-4" /> Exportar Movimientos
+                          <Download className="w-4 h-4" /> Exportar Reporte
                         </button>
                       </div>
                     </div>
@@ -581,14 +609,14 @@ export default function App() {
               )
             ) : (
               /* PDF TOOL CONTENT */
-              !bankResults ? (
+              !bankResults.length ? (
                 <div className="h-[650px] bg-white rounded-3xl border border-slate-200 flex flex-col items-center justify-center text-center p-12 shadow-sm border-dashed">
                   <div className="bg-blue-50 p-8 rounded-full mb-8">
                     <FileText className="w-16 h-16 text-blue-400" />
                   </div>
                   <h3 className="text-3xl font-black text-slate-800 mb-3 tracking-tight">Reporte Bancario AI</h3>
                   <p className="text-slate-400 max-w-sm text-sm leading-relaxed font-medium">
-                    Sube un estado de cuenta en PDF para extraer automáticamente todos los movimientos utilizando Inteligencia Artificial.
+                    Sube estados de cuenta en PDF para extraer automáticamente todos los movimientos utilizando Inteligencia Artificial.
                   </p>
                 </div>
               ) : (
@@ -599,12 +627,12 @@ export default function App() {
                 >
                   <div className="p-8 border-b border-slate-100 flex items-center justify-between bg-blue-50/30">
                     <div>
-                      <h3 className="text-2xl font-black text-slate-800 tracking-tight">Movimientos Bancarios</h3>
-                      <p className="text-xs text-blue-600 font-bold mt-1 uppercase tracking-widest">{bankResults.filename}</p>
+                      <h3 className="text-2xl font-black text-slate-800 tracking-tight">Consolidado Bancario</h3>
+                      <p className="text-xs text-blue-600 font-bold mt-1 uppercase tracking-widest italic">{bankResults.filter(r => r.status === 'success').length} Archivos Procesados</p>
                     </div>
                     <div className="flex items-center gap-3">
                        <span className="bg-white px-4 py-2 rounded-xl border border-blue-100 text-xs font-black text-blue-600 shadow-sm">
-                         AI EXTRACTOR
+                         EXTRACTOR INTELIGENTE
                        </span>
                     </div>
                   </div>
@@ -613,27 +641,41 @@ export default function App() {
                     <table className="w-full text-left border-collapse min-w-[800px]">
                       <thead className="bg-slate-900 border-b border-white/10">
                         <tr>
+                          <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em]">Origen</th>
                           <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em]">Fecha</th>
                           <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em]">Descripción / Concepto</th>
-                          <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em]">Referencia</th>
                           <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em] text-right">Cargo</th>
                           <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em] text-right">Abono</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
-                        {bankResults.transactions.map((tx, idx) => (
-                          <tr key={idx} className="hover:bg-blue-50/20 transition-colors group">
-                            <td className="px-8 py-6 text-sm font-bold text-slate-700">{tx.fecha}</td>
-                            <td className="px-8 py-6 text-sm font-medium text-slate-600 max-w-[400px]">{tx.descripcion}</td>
-                            <td className="px-8 py-6 text-xs font-mono text-slate-400">{tx.referencia || '-'}</td>
-                            <td className="px-8 py-6 text-right font-bold text-red-600">
-                              {tx.tipo === 'Cargo' ? `$${tx.monto.toLocaleString('es-MX', { minimumFractionDigits: 2 })}` : '-'}
-                            </td>
-                            <td className="px-8 py-6 text-right font-bold text-emerald-600">
-                              {tx.tipo === 'Abono' ? `$${tx.monto.toLocaleString('es-MX', { minimumFractionDigits: 2 })}` : '-'}
-                            </td>
-                          </tr>
-                        ))}
+                        {bankResults.flatMap((res, rIdx) => 
+                          res.status === 'success' ? 
+                            res.transactions.map((tx, idx) => (
+                              <tr key={`${rIdx}-${idx}`} className="hover:bg-blue-50/20 transition-colors group">
+                                <td className="px-8 py-6">
+                                  <div className="text-[10px] font-black text-blue-600 bg-blue-50 px-2 py-1 rounded truncate max-w-[120px]" title={res.filename}>
+                                    {res.filename}
+                                  </div>
+                                </td>
+                                <td className="px-8 py-6 text-xs font-bold text-slate-700">{tx.fecha}</td>
+                                <td className="px-8 py-6 text-xs font-medium text-slate-600 max-w-[350px]">{tx.descripcion}</td>
+                                <td className="px-8 py-6 text-right font-bold text-red-600 text-sm whitespace-nowrap">
+                                  {tx.tipo === 'Cargo' ? `$${tx.monto.toLocaleString('es-MX', { minimumFractionDigits: 2 })}` : '-'}
+                                </td>
+                                <td className="px-8 py-6 text-right font-bold text-emerald-600 text-sm whitespace-nowrap">
+                                  {tx.tipo === 'Abono' ? `$${tx.monto.toLocaleString('es-MX', { minimumFractionDigits: 2 })}` : '-'}
+                                </td>
+                              </tr>
+                            ))
+                          : (
+                            <tr key={`err-${rIdx}`}>
+                              <td colSpan={5} className="px-8 py-4 bg-red-50 text-red-500 text-xs font-bold">
+                                Error en {res.filename}: {res.error}
+                              </td>
+                            </tr>
+                          )
+                        )}
                       </tbody>
                     </table>
                   </div>
@@ -654,7 +696,7 @@ export default function App() {
           </p>
           <div className="w-12 h-1 bg-wheat mx-auto my-8 rounded-full opacity-30" />
           <p className="text-white/20 text-[10px] font-medium tracking-wider">
-            © {new Date().getFullYear()} ISBB SOLUCIONES - v1.4 PROD FINAL 00:08
+            © {new Date().getFullYear()} ISBB SOLUCIONES - v2.0 PROD FIX 00:44
           </p>
         </div>
       </footer>

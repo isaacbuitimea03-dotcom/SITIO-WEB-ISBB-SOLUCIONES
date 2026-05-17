@@ -29,7 +29,7 @@ export interface BankTransaction {
 }
 
 export async function extractTransactionsFromPDF(buffer: Buffer): Promise<BankTransaction[]> {
-  console.log('Gemini Service: Starting extraction from PDF buffer. Size:', buffer.length);
+  console.log('[GeminiService] Analizando PDF buffer. Tamaño:', buffer.length, 'bytes');
   const ai = getGenAI();
   
   const prompt = `
@@ -37,7 +37,7 @@ export async function extractTransactionsFromPDF(buffer: Buffer): Promise<BankTr
     Busca en todas las páginas del documento.
     
     Cada transacción debe tener:
-    - fecha: La fecha de la operación en formato DD/MM/YYYY.
+    - fecha: La fecha de la operación (DD/MM/YYYY).
     - descripcion: Concepto detallado del movimiento.
     - monto: El valor numérico del importe (positivo siempre).
     - tipo: Debe ser 'Cargo' para retiros/pagos/gastos, o 'Abono' para depósitos/pagos recibidos.
@@ -47,12 +47,14 @@ export async function extractTransactionsFromPDF(buffer: Buffer): Promise<BankTr
     1. No omitas ningún movimiento.
     2. Identifica correctamente la columna de Cargos (Retiros) y Abonos (Depósitos).
     3. Si el documento tiene varias secciones (ej. compras, pagos de tarjeta, transferencias), inclúyelas todas.
-    4. Responde ÚNICAMENTE con el JSON solicitado.
+    4. Responde EXCLUSIVAMENTE con el arreglo JSON solicitado.
   `;
 
   try {
+    console.log('[GeminiService] Llamando a Gemini API (gemini-3-flash-preview)...');
+    
     const response = await ai.models.generateContent({
-      model: "gemini-1.5-flash",
+      model: "gemini-3-flash-preview",
       contents: {
         parts: [
           {
@@ -74,28 +76,27 @@ export async function extractTransactionsFromPDF(buffer: Buffer): Promise<BankTr
               fecha: { type: Type.STRING },
               descripcion: { type: Type.STRING },
               monto: { type: Type.NUMBER },
-              tipo: { type: Type.STRING, description: "Debe ser 'Cargo' o 'Abono'" },
+              tipo: { type: Type.STRING, description: "Cargo o Abono" },
               referencia: { type: Type.STRING },
             },
             required: ['fecha', 'descripcion', 'monto', 'tipo'],
           },
         },
-      },
+      }
     });
 
     const text = response.text;
+    console.log('[GeminiService] Crudo:', text?.substring(0, 100));
+    
     if (!text) {
-      console.warn('Gemini Service: Empty response text');
-      throw new Error("Gemini no devolvió ninguna respuesta válida.");
+      throw new Error("La IA no generó texto en la respuesta.");
     }
 
-    console.log('Gemini Service: Successfully received text response');
     const data = JSON.parse(text);
-    console.log('Gemini Service: Successfully parsed JSON. Items:', data.length);
+    console.log('[GeminiService] Parseado con éxito:', Array.isArray(data) ? data.length : 'no es array');
     return data;
   } catch (error: any) {
-    console.error("Gemini PDF Service Error:", error);
-    const errorMessage = error.message || "Error desconocido en el servicio de IA";
-    throw new Error(`Error en el análisis de IA: ${errorMessage}`);
+    console.error("[GeminiService] Detalle del Error:", error);
+    throw new Error(`Falla en IA: ${error.message}`);
   }
 }
