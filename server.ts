@@ -25,24 +25,26 @@ async function start() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 
-  // API Health check - DEFINED FIRST BEFORE ANY MIDDLEWARE
-  app.get('/api/health', (req, res) => {
-    console.log('[HEALTH] Request received');
-    res.json({ 
-      status: 'ok', 
-      version: '3.5.0',
-      time: new Date().toISOString()
-    });
-  });
-
   app.use(cors());
   app.use(express.json());
 
-  // Log every single request for maximum visibility
+  // Log every single request for maximum visibility - MOVE TO TOP
   app.use((req, res, next) => {
     console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
     next();
   });
+
+  // API Health check
+  app.get('/api/health', (req, res) => {
+    console.log('[HEALTH] Request received');
+    res.json({ 
+      status: 'ok', 
+      version: '3.6.0',
+      time: new Date().toISOString()
+    });
+  });
+
+  // XML Analysis Route
   app.post('/api/analyze-xml', upload.array('files'), (req: Request, res: Response) => {
     console.log('[XML] Start processing');
     try {
@@ -84,19 +86,22 @@ async function start() {
     console.log('Production mode: Serving static files from dist/');
     const distPath = path.join(process.cwd(), 'dist');
     
+    // API Fallback handler (MUST be before static wildcard but after all API routes)
+    app.all('/api/*', (req, res) => {
+      console.warn(`[API_404] ${req.method} ${req.url} - Not matched by any route`);
+      res.status(404).json({ 
+        error: 'API route not found', 
+        method: req.method,
+        url: req.url,
+        version: '3.6.0'
+      });
+    });
+
     // Serve static files
     app.use(express.static(distPath));
     
     // Wildcard handler for SPA
     app.get('*', (req, res) => {
-      if (req.url.startsWith('/api/')) {
-        console.warn(`[NOT_FOUND] Missing API route: ${req.url}`);
-        return res.status(404).json({ 
-          error: 'API route not found', 
-          url: req.url,
-          hint: 'Ensure your health check and processing routes are defined before the static wildcard.'
-        });
-      }
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }

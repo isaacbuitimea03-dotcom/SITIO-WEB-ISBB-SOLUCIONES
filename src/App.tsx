@@ -88,7 +88,9 @@ export default function App() {
         body: formData,
       });
       
+      console.log(`[API] Response status: ${response.status} (${response.statusText})`);
       const contentType = response.headers.get('content-type');
+      console.log(`[API] Content-Type: ${contentType}`);
       if (!response.ok) {
         if (contentType && contentType.includes('application/json')) {
           const errData = await response.json();
@@ -529,7 +531,7 @@ export default function App() {
           </p>
           <div className="w-12 h-1 bg-wheat mx-auto my-8 rounded-full opacity-30" />
           <p className="text-white/20 text-[10px] font-medium tracking-wider">
-            © {new Date().getFullYear()} ISBB SOLUCIONES - v3.5 STABLE (XML ONLY)
+            © {new Date().getFullYear()} ISBB SOLUCIONES - v3.6 STABLE (API FIXED)
           </p>
         </div>
       </footer>
