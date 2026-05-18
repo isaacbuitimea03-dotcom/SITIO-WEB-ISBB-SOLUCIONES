@@ -48,20 +48,27 @@ export default function App() {
   const [activeTool, setActiveTool] = useState<'xml' | 'pdf'>('xml');
   const [bankResults, setBankResults] = useState<AnalysisResultPDF[]>([]);
   const [serverHealth, setServerHealth] = useState<'checking' | 'ok' | 'fail'>('checking');
-
+  const [serverStatusDetail, setServerStatusDetail] = useState<string>('');
   const [showSuccess, setShowSuccess] = useState(false);
 
   const checkServer = async () => {
     try {
-      // Use cache: 'no-store' to ensure we're not getting a cached offline response
+      const start = Date.now();
       const res = await fetch('/api/health', { cache: 'no-store' });
-      if (res.status === 200) {
+      const latency = Date.now() - start;
+      
+      if (res.ok) {
         setServerHealth('ok');
+        setServerStatusDetail(`${latency}ms`);
       } else {
+        console.warn(`Health check failed with status: ${res.status}`);
         setServerHealth('fail');
+        setServerStatusDetail(`HTTP ${res.status}`);
       }
-    } catch (e) {
+    } catch (e: any) {
+      console.error('Health check connection error:', e);
       setServerHealth('fail');
+      setServerStatusDetail(e.message || 'Error de conexión');
     }
   };
 
@@ -304,7 +311,7 @@ export default function App() {
             {serverHealth === 'ok' && (
               <div className="flex items-center gap-1.5">
                 <div className="w-1.5 h-1.5 bg-emerald-400 rounded-full shadow-[0_0_8px_rgba(52,211,153,0.6)]" />
-                <span className="text-[10px] font-black text-emerald-400 uppercase">En Línea</span>
+                <span className="text-[10px] font-black text-emerald-400 uppercase">En Línea {serverStatusDetail && `(${serverStatusDetail})`}</span>
               </div>
             )}
             {serverHealth === 'fail' && (
@@ -313,7 +320,9 @@ export default function App() {
                 className="flex items-center gap-1.5 hover:opacity-80 transition-opacity"
               >
                 <div className="w-1.5 h-1.5 bg-red-400 rounded-full shadow-[0_0_8px_rgba(248,113,113,0.6)]" />
-                <span className="text-[10px] font-black text-red-400 uppercase underline decoration-dotted">Desconectado (Reintentar)</span>
+                <span className="text-[10px] font-black text-red-400 uppercase underline decoration-dotted">
+                  Desconectado {serverStatusDetail ? `[${serverStatusDetail}]` : '(Reintentar)'}
+                </span>
               </button>
             )}
           </div>
@@ -773,7 +782,7 @@ export default function App() {
           </p>
           <div className="w-12 h-1 bg-wheat mx-auto my-8 rounded-full opacity-30" />
           <p className="text-white/20 text-[10px] font-medium tracking-wider">
-            © {new Date().getFullYear()} ISBB SOLUCIONES - v3.2.1 STABLE (RETRIES+)
+            © {new Date().getFullYear()} ISBB SOLUCIONES - v3.3 STABLE (CLOUD+)
           </p>
         </div>
       </footer>
