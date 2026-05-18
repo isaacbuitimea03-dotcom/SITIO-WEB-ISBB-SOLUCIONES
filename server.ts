@@ -39,68 +39,69 @@ async function start() {
     console.log('[HEALTH] Request received');
     res.json({ 
       status: 'ok', 
-      version: '3.6.0',
+      version: '3.7.0',
       time: new Date().toISOString()
     });
   });
 
-  // XML Analysis Route
+  // XML Analysis Route - DEFINED CLEARLY AT TOP LEVEL
   app.post('/api/analyze-xml', upload.array('files'), (req: Request, res: Response) => {
-    console.log('[XML] Start processing');
+    console.log('[XML] POST /api/analyze-xml reached');
     try {
       const files = (req as MulterRequest).files as Express.Multer.File[];
       if (!files || files.length === 0) {
+        console.warn('[XML] No files in request');
         return res.status(400).json({ error: 'No se subieron archivos XML' });
       }
 
+      console.log(`[XML] Processing ${files.length} files...`);
       const results = files.map(file => {
         try {
           const xmlContent = file.buffer.toString('utf-8');
+          const parsedData = parseCFDI(xmlContent);
+          console.log(`[XML] Success: ${file.originalname}`);
           return {
             filename: file.originalname,
-            data: parseCFDI(xmlContent),
+            data: parsedData,
             status: 'success'
           };
         } catch (error: any) {
-          console.error(`[XML] Error in ${file.originalname}:`, error);
+          console.error(`[XML] Error in file ${file.originalname}:`, error.message);
           return { filename: file.originalname, error: error.message, status: 'error' };
         }
       });
 
       res.json(results);
     } catch (error: any) {
-      console.error('[XML] Global error:', error);
-      res.status(500).json({ error: 'Error interno al procesar XML', details: error.message });
+      console.error('[XML] Global processing error:', error);
+      res.status(500).json({ error: 'Error interno del servidor al procesar XML', details: error.message });
     }
   });
 
   // Development vs Production setup
-  if (process.env.NODE_ENV !== 'production' && !process.env.AIS_PREVIEW) {
-    console.log('Starting VITE dev middleware...');
+  const isProduction = process.env.NODE_ENV === 'production' || process.env.AIS_PREVIEW === 'true';
+
+  if (!isProduction) {
+    console.log('Starting VITE dev middleware (Development Mode)');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    console.log('Production mode: Serving static files from dist/');
-    const distPath = path.join(process.cwd(), 'dist');
+    console.log('Production Mode: Serving static assets');
+    const distPath = path.resolve(process.cwd(), 'dist');
     
-    // API Fallback handler (MUST be before static wildcard but after all API routes)
-    app.all('/api/*', (req, res) => {
-      console.warn(`[API_404] ${req.method} ${req.url} - Not matched by any route`);
-      res.status(404).json({ 
-        error: 'API route not found', 
-        method: req.method,
-        url: req.url,
-        version: '3.6.0'
-      });
-    });
-
-    // Serve static files
+    // Serve static files from /dist
     app.use(express.static(distPath));
     
-    // Wildcard handler for SPA
+    // API 404 Handler - Only for paths starting with /api/ that were NOT matched above
+    app.all('/api/*', (req, res) => {
+      console.warn(`[NOT_FOUND] Route ${req.method} ${req.url} failed to match`);
+      res.status(404).json({ error: 'Ruta de API no encontrada o método incorrecto' });
+    });
+
+    // SPA Wildcard - Handle all other routes by serving index.html
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
