@@ -3,7 +3,6 @@ import path from 'path';
 import multer from 'multer';
 import { createServer as createViteServer } from 'vite';
 import { parseCFDI } from './src/lib/xmlParser';
-import { extractTransactionsFromPDF } from './src/services/geminiService';
 import cors from 'cors';
 import * as dotenv from 'dotenv';
 
@@ -31,7 +30,7 @@ async function start() {
     console.log('[HEALTH] Request received');
     res.json({ 
       status: 'ok', 
-      version: '3.4.0',
+      version: '3.5.0',
       time: new Date().toISOString()
     });
   });
@@ -70,44 +69,6 @@ async function start() {
     } catch (error: any) {
       console.error('[XML] Global error:', error);
       res.status(500).json({ error: 'Error interno al procesar XML', details: error.message });
-    }
-  });
-
-  // PDF Analysis Route
-  app.post('/api/analyze-pdf-bank', upload.array('files'), async (req: Request, res: Response) => {
-    console.log('[PDF] Start processing');
-    try {
-      const files = (req as MulterRequest).files as Express.Multer.File[];
-      if (!files || files.length === 0) {
-        return res.status(400).json({ error: 'No se subieron archivos PDF' });
-      }
-
-      const results = await Promise.all(
-        files.map(async file => {
-          try {
-            console.log(`[PDF] Analyzing: ${file.originalname}`);
-            const transactions = await extractTransactionsFromPDF(file.buffer);
-            return {
-              filename: file.originalname,
-              transactions,
-              status: 'success'
-            };
-          } catch (error: any) {
-            console.error(`[PDF] Error in ${file.originalname}:`, error);
-            return {
-              filename: file.originalname,
-              error: error.message,
-              status: 'error',
-              transactions: []
-            };
-          }
-        })
-      );
-
-      res.json(results);
-    } catch (error: any) {
-      console.error('[PDF] Global error:', error);
-      res.status(500).json({ error: 'Error fatal en servidor PDF', details: error.message });
     }
   });
 
