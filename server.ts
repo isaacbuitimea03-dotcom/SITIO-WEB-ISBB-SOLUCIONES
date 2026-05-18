@@ -26,6 +26,16 @@ async function start() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 
+  // API Health check - DEFINED FIRST BEFORE ANY MIDDLEWARE
+  app.get('/api/health', (req, res) => {
+    console.log('[HEALTH] Request received');
+    res.json({ 
+      status: 'ok', 
+      version: '3.4.0',
+      time: new Date().toISOString()
+    });
+  });
+
   app.use(cors());
   app.use(express.json());
 
@@ -34,17 +44,6 @@ async function start() {
     console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
     next();
   });
-
-  // API Health check (MUST be before static/wildcard)
-  app.get('/api/health', (req, res) => {
-    res.json({ 
-      status: 'ok', 
-      version: '3.3.0',
-      time: new Date().toISOString()
-    });
-  });
-
-  // XML Analysis Route
   app.post('/api/analyze-xml', upload.array('files'), (req: Request, res: Response) => {
     console.log('[XML] Start processing');
     try {
@@ -129,9 +128,13 @@ async function start() {
     
     // Wildcard handler for SPA
     app.get('*', (req, res) => {
-      // Don't serve index.html for missing /api routes
       if (req.url.startsWith('/api/')) {
-        return res.status(404).json({ error: 'API route not found' });
+        console.warn(`[NOT_FOUND] Missing API route: ${req.url}`);
+        return res.status(404).json({ 
+          error: 'API route not found', 
+          url: req.url,
+          hint: 'Ensure your health check and processing routes are defined before the static wildcard.'
+        });
       }
       res.sendFile(path.join(distPath, 'index.html'));
     });
