@@ -50,53 +50,82 @@ export async function extractTransactionsFromPDF(buffer: Buffer): Promise<BankTr
     4. Responde EXCLUSIVAMENTE con el arreglo JSON solicitado. No incluyas markdown o explicaciones.
   `;
 
-  try {
-    console.log('[GeminiService] Llamando a Gemini API (gemini-3-flash-preview)...');
-    
-    const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
-      contents: {
-        parts: [
-          {
-            inlineData: {
-              data: buffer.toString('base64'),
-              mimeType: 'application/pdf'
-            }
-          },
-          { text: prompt }
-        ]
-      },
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              fecha: { type: Type.STRING },
-              descripcion: { type: Type.STRING },
-              monto: { type: Type.NUMBER },
-              tipo: { type: Type.STRING, description: "Cargo o Abono" },
-              referencia: { type: Type.STRING },
-            },
-            required: ['fecha', 'descripcion', 'monto', 'tipo'],
-          },
-        },
-      }
-    });
+  const maxRetries = 5;
+  let lastError: any = null;
 
-    const text = response.text;
-    if (!text) {
-      console.warn('[GeminiService] Respuesta sin texto. Response:', JSON.stringify(response));
-      throw new Error("La IA no generó una respuesta válida.");
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`[GeminiService] Llamando a Gemini API (${attempt}/${maxRetries})...`);
+      
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: {
+          parts: [
+            {
+              inlineData: {
+                data: buffer.toString('base64'),
+                mimeType: 'application/pdf'
+              }
+            },
+            { text: prompt }
+          ]
+        },
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                fecha: { type: Type.STRING },
+                descripcion: { type: Type.STRING },
+                monto: { type: Type.NUMBER },
+                tipo: { type: Type.STRING, description: "Cargo o Abono" },
+                referencia: { type: Type.STRING },
+              },
+              required: ['fecha', 'descripcion', 'monto', 'tipo'],
+            },
+          },
+        }
+      });
+
+      const text = response.text;
+      if (!text) {
+        throw new Error("La IA no generó una respuesta válida (texto vacío).");
+      }
+      
+      const data = JSON.parse(text);
+      console.log(`[GeminiService] Éxito en intento ${attempt}. Transacciones: ${Array.isArray(data) ? data.length : 'N/A'}`);
+      return data;
+    } catch (error: any) {
+      lastError = error;
+      const errorMsg = typeof error === 'string' ? error : (error.message || JSON.stringify(error));
+      console.error(`[GeminiService] Error intento ${attempt}:`, errorMsg.substring(0, 200));
+      
+      // Extended retry check
+      const isRetryable = 
+        errorMsg.includes('503') || 
+        errorMsg.includes('429') || 
+        errorMsg.includes('500') ||
+        errorMsg.includes('high demand') || 
+        errorMsg.includes('Overloaded') ||
+        errorMsg.includes('UNAVAILABLE') ||
+        errorMsg.includes('rate limit');
+      
+      if (isRetryable && attempt < maxRetries) {
+        // Exponential backoff with jitter: 2s, 4s, 8s, 16s... plus random 0-2s
+        const backoff = Math.pow(2, attempt) * 1000;
+        const jitter = Math.random() * 2000;
+        const delay = backoff + jitter;
+        
+        console.log(`[GeminiService] Error reintentable detectado. Esperando ${Math.round(delay)}ms antes del siguiente intento...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      } else {
+        console.error(`[GeminiService] Error no reintentable o intentos agotados.`);
+        break;
+      }
     }
-    
-    console.log('[GeminiService] Respuesta cruda (primeros 50 chars):', text.substring(0, 50));
-    const data = JSON.parse(text);
-    console.log('[GeminiService] Transacciones extraídas:', Array.isArray(data) ? data.length : 'Error');
-    return data;
-  } catch (error: any) {
-    console.error("[GeminiService] Detalle del Error:", error);
-    throw new Error(`Falla en IA: ${error.message || 'Error desconocido'}`);
   }
+
+  throw new Error(`Error de Procesamiento (IA): No se pudo analizar el documento tras ${maxRetries} intentos debido a la alta demanda del servicio. Por favor, intenta de nuevo en unos minutos.`);
 }

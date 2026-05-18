@@ -49,18 +49,29 @@ export default function App() {
   const [bankResults, setBankResults] = useState<AnalysisResultPDF[]>([]);
   const [serverHealth, setServerHealth] = useState<'checking' | 'ok' | 'fail'>('checking');
 
-  React.useEffect(() => {
-    const checkServer = async () => {
-      try {
-        const res = await fetch('/api/health');
-        if (res.ok) setServerHealth('ok');
-        else setServerHealth('fail');
-      } catch (e) {
+  const [showSuccess, setShowSuccess] = useState(false);
+
+  const checkServer = async () => {
+    try {
+      // Use cache: 'no-store' to ensure we're not getting a cached offline response
+      const res = await fetch('/api/health', { cache: 'no-store' });
+      if (res.status === 200) {
+        setServerHealth('ok');
+      } else {
         setServerHealth('fail');
       }
+    } catch (e) {
+      setServerHealth('fail');
+    }
+  };
+
+  React.useEffect(() => {
+    const timer = setTimeout(checkServer, 1500);
+    const interval = setInterval(checkServer, 30000); // Check every 30s
+    return () => {
+      clearTimeout(timer);
+      clearInterval(interval);
     };
-    const timer = setTimeout(checkServer, 1000);
-    return () => clearTimeout(timer);
   }, []);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -112,6 +123,8 @@ export default function App() {
       if (contentType && contentType.includes('application/json')) {
         const data = await response.json();
         setResults(data);
+        setShowSuccess(true);
+        setTimeout(() => setShowSuccess(false), 3000);
       } else {
         throw new Error('La respuesta del servidor no es un JSON válido');
       }
@@ -143,6 +156,8 @@ export default function App() {
 
       const data = await response.json();
       setBankResults(data);
+      setShowSuccess(true);
+      setTimeout(() => setShowSuccess(false), 3000);
     } catch (error: any) {
       console.error('Final Bank Analysis Catch:', error);
       alert(`Error al analizar PDF: ${error.message}`);
@@ -255,8 +270,54 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
+      {/* Success Toast */}
+      <AnimatePresence>
+        {showSuccess && (
+          <motion.div 
+            initial={{ opacity: 0, y: 50, scale: 0.9 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 50, scale: 0.9 }}
+            className="fixed bottom-10 left-1/2 -translate-x-1/2 z-50 bg-slate-900 border border-wheat/30 text-white px-8 py-4 rounded-3xl shadow-2xl flex items-center gap-4 border-l-4 border-l-wheat"
+          >
+            <div className="bg-wheat p-1.5 rounded-full">
+              <CheckCircle2 className="w-5 h-5 text-slate-900" />
+            </div>
+            <div>
+              <p className="text-sm font-black uppercase tracking-widest text-wheat">Éxito</p>
+              <p className="text-xs font-bold text-white/70">Procesamiento completado con éxito</p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Header */}
       <header className="bg-gold-gradient shadow-xl sticky top-0 z-20">
+        <div className="bg-slate-900/50 backdrop-blur-sm py-1 border-b border-white/5">
+          <div className="max-w-7xl mx-auto px-4 flex items-center justify-end gap-3">
+            <span className="text-[9px] font-bold text-white/40 uppercase tracking-widest">Estado del Servidor:</span>
+            {serverHealth === 'checking' && (
+              <div className="flex items-center gap-1.5">
+                <div className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-pulse" />
+                <span className="text-[10px] font-black text-blue-400 uppercase">Conectando...</span>
+              </div>
+            )}
+            {serverHealth === 'ok' && (
+              <div className="flex items-center gap-1.5">
+                <div className="w-1.5 h-1.5 bg-emerald-400 rounded-full shadow-[0_0_8px_rgba(52,211,153,0.6)]" />
+                <span className="text-[10px] font-black text-emerald-400 uppercase">En Línea</span>
+              </div>
+            )}
+            {serverHealth === 'fail' && (
+              <button 
+                onClick={checkServer}
+                className="flex items-center gap-1.5 hover:opacity-80 transition-opacity"
+              >
+                <div className="w-1.5 h-1.5 bg-red-400 rounded-full shadow-[0_0_8px_rgba(248,113,113,0.6)]" />
+                <span className="text-[10px] font-black text-red-400 uppercase underline decoration-dotted">Desconectado (Reintentar)</span>
+              </button>
+            )}
+          </div>
+        </div>
         <div className="max-w-7xl mx-auto px-4 h-20 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="bg-white/10 backdrop-blur-md p-2.5 rounded-xl border border-white/20">
@@ -712,7 +773,7 @@ export default function App() {
           </p>
           <div className="w-12 h-1 bg-wheat mx-auto my-8 rounded-full opacity-30" />
           <p className="text-white/20 text-[10px] font-medium tracking-wider">
-            © {new Date().getFullYear()} ISBB SOLUCIONES - v2.7 STABLE {serverHealth === 'ok' ? '🟢 ONLINE' : serverHealth === 'fail' ? '🔴 OFFLINE' : '⚪ CONNECTING...'}
+            © {new Date().getFullYear()} ISBB SOLUCIONES - v3.2.1 STABLE (RETRIES+)
           </p>
         </div>
       </footer>
