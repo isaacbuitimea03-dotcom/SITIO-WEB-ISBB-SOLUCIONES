@@ -1,4 +1,4 @@
-import express, { Request, Response } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import multer from 'multer';
 import { createServer as createViteServer } from 'vite';
@@ -34,39 +34,67 @@ app.use((req, res, next) => {
 });
 
 // API Routes (Defined on the app object directly)
+app.get('/api/debug', (req, res) => {
+  res.json({
+    url: req.url,
+    originalUrl: req.originalUrl,
+    path: req.path,
+    query: req.query,
+    headers: req.headers,
+    method: req.method
+  });
+});
+
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'ok', 
-    version: '3.8.0',
+    version: '3.9.0',
     time: new Date().toISOString(),
-    platform: process.env.VERCEL ? 'Vercel' : 'Standard'
+    platform: process.env.VERCEL ? 'Vercel' : 'Standard',
+    env: process.env.NODE_ENV,
+    cwd: process.cwd()
   });
 });
 
 app.post('/api/analyze-xml', upload.array('files'), (req: Request, res: Response) => {
+  console.log('[XML] Analizando petición POST...');
   try {
     const files = (req as MulterRequest).files as Express.Multer.File[];
     if (!files || files.length === 0) {
+      console.warn('[XML] No se recibieron archivos');
       return res.status(400).json({ error: 'No se subieron archivos XML' });
     }
 
+    console.log(`[XML] Procesando ${files.length} archivos`);
     const results = files.map(file => {
       try {
         const xmlContent = file.buffer.toString('utf-8');
+        const data = parseCFDI(xmlContent);
         return {
           filename: file.originalname,
-          data: parseCFDI(xmlContent),
+          data,
           status: 'success'
         };
       } catch (error: any) {
+        console.error(`[XML] Error en ${file.originalname}:`, error.message);
         return { filename: file.originalname, error: error.message, status: 'error' };
       }
     });
 
     res.json(results);
   } catch (error: any) {
+    console.error('[XML] Error global:', error);
     res.status(500).json({ error: 'Error interno del servidor', details: error.message });
   }
+});
+
+// Middleware de manejo de errores global
+app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+  console.error('[GLOBAL ERROR]:', err);
+  if (err instanceof multer.MulterError) {
+    return res.status(400).json({ error: `Error de carga: ${err.message}` });
+  }
+  res.status(500).json({ error: 'Error inesperado en el servidor', details: err.message });
 });
 
 async function start() {
