@@ -1,358 +1,436 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { 
   FileText, 
   Upload, 
   Download, 
+  Table as TableIcon, 
+  PieChart, 
+  AlertCircle, 
+  CheckCircle2,
   Trash2,
-  FileSearch,
-  Monitor,
-  MousePointer2,
-  Save,
-  Info,
-  Loader2
+  ChevronRight,
+  Search,
+  Filter
 } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
-import { format, parseISO } from 'date-fns';
+import { format } from 'date-fns';
 import { CFDIData } from './lib/xmlParser';
-import { USO_CFDI, FORMA_PAGO, METODO_PAGO } from './lib/catalogs';
 
 interface AnalysisResult {
   filename: string;
   data?: CFDIData;
-  status: 'success' | 'error';
   error?: string;
+  status: 'success' | 'error';
 }
 
 export default function App() {
+  const [files, setFiles] = useState<File[]>([]);
   const [results, setResults] = useState<AnalysisResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState('');
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handleFiles = async (fileList: FileList) => {
-    const xmlFiles = Array.from(fileList).filter(file => file.name.endsWith('.xml'));
-    if (xmlFiles.length === 0) return;
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files) {
+      setFiles(prev => [...prev, ...Array.from(e.target.files || [])]);
+    }
+  };
 
+  const removeFile = (index: number) => {
+    setFiles(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const uploadAndAnalyze = async () => {
+    if (files.length === 0) return;
     setLoading(true);
+    
     const formData = new FormData();
-    xmlFiles.forEach(file => formData.append('files', file));
+    files.forEach(file => formData.append('files', file));
 
     try {
       const response = await fetch('/api/analyze-xml', {
         method: 'POST',
         body: formData,
       });
-
-      if (!response.ok) throw new Error('Error en el servidor');
       const data = await response.json();
       setResults(data);
-    } catch (error: any) {
-      alert('Error: ' + error.message);
+    } catch (error) {
+      console.error('Error analyzing files:', error);
     } finally {
       setLoading(false);
     }
   };
 
   const exportToExcel = () => {
-    const validResults = [...results]
-      .filter(r => r.status === 'success' && r.data)
-      .sort((a, b) => new Date(a.data!.fecha).getTime() - new Date(b.data!.fecha).getTime());
+    const validResults = results.filter(r => r.status === 'success' && r.data);
+    if (validResults.length === 0) {
+      alert('No hay datos válidos para exportar.');
+      return;
+    }
 
-    if (validResults.length === 0) return;
+    // Sort by date safely
+    const sortedResults = [...validResults].sort((a, b) => {
+      const dateA = a.data?.fecha ? new Date(a.data.fecha).getTime() : 0;
+      const dateB = b.data?.fecha ? new Date(b.data.fecha).getTime() : 0;
+      return dateA - dateB;
+    });
 
-    const dataToExport = validResults.map(r => ({
-      'Fecha': format(parseISO(r.data!.fecha), 'yyyy-MM-dd HH:mm:ss'),
-      'Serie': r.data!.serie,
-      'Folio': r.data!.folio,
-      'UUID': r.data!.uuid,
-      'RFC Emisor': r.data!.emisorRfc,
-      'Nombre Emisor': r.data!.emisorNombre,
-      'RFC Receptor': r.data!.receptorRfc,
-      'Nombre Receptor': r.data!.receptorNombre,
-      'Uso CFDI': `${r.data!.usoCFDI} - ${USO_CFDI[r.data!.usoCFDI] || 'N/A'}`,
-      'Metodo Pago': `${r.data!.metodoPago} - ${METODO_PAGO[r.data!.metodoPago] || 'N/A'}`,
-      'Forma Pago': `${r.data!.formaPago} - ${FORMA_PAGO[r.data!.formaPago] || 'N/A'}`,
-      'Conceptos': r.data!.conceptos,
-      'Subtotal': r.data!.subtotal,
-      'Descuento': r.data!.descuento,
-      'IVA Trasladado (002)': r.data!.impuestos.ivaTrasladado,
-      'IEPS Trasladado (003)': r.data!.impuestos.iepsTrasladado,
-      'IVA Retenido': r.data!.impuestos.ivaRetenido,
-      'ISR Retenido': r.data!.impuestos.isrRetenido,
-      'Total Impuestos Trasl.': r.data!.impuestos.totalTrasladados,
-      'Total Impuestos Ret.': r.data!.impuestos.totalRetenidos,
-      'Total': r.data!.total,
-    }));
+    const flattenedData = sortedResults.map(r => {
+      const d = r.data!;
+      const i = d.impuestos.desglose;
+      return {
+        'Fecha Emision': d.fecha || 'N/A',
+        'UUID': d.uuid,
+        'Serie': d.serie,
+        'Folio': d.folio,
+        'Tipo Comprobante': d.tipo,
+        'RFC Emisor': d.emisorRfc,
+        'Nombre Emisor': d.emisorNombre,
+        'RFC Receptor': d.receptorRfc,
+        'Nombre Receptor': d.receptorNombre,
+        'Uso CFDI': `${d.usoCFDI} - ${d.usoCFDINombre}`,
+        'Moneda': d.moneda,
+        'Tipo Cambio': d.tipoCambio,
+        'Subtotal (MXN)': d.subtotal,
+        'Descuento (MXN)': d.descuento,
+        'Base IVA 16%': i.base16,
+        'IVA 16%': i.iva16,
+        'Base IVA 8%': i.base8,
+        'IVA 8%': i.iva8,
+        'Base IVA 0%': i.base0,
+        'Base Exento': i.baseExento,
+        'No Objeto de Impuesto': i.baseNoObjeto,
+        'Base IEPS': i.baseIEPS,
+        'IEPS': i.ieps,
+        'Retencion IVA': i.retIVA,
+        'Retencion ISR': i.retISR,
+        'Otros Traslados': i.otrosTrasladados,
+        'Otros Retenidos': i.otrosRetenidos,
+        'Total Trasladados': d.impuestos.totalTrasladados,
+        'Total Retenidos': d.impuestos.totalRetenidos,
+        'Total Factura (MXN)': d.total,
+        'Metodo Pago': d.metodoPago,
+        'Forma Pago': d.formaPago,
+        'Conceptos': d.conceptos.map(c => `${c.cantidad} ${c.unidad} - ${c.descripcion}`).join(' | '),
+      };
+    });
 
-    const worksheet = XLSX.utils.json_to_sheet(dataToExport);
+    const worksheet = XLSX.utils.json_to_sheet(flattenedData);
     
-    // Auto-size columns (rough estimate)
-    const maxWidths = dataToExport.reduce((acc: any, row: any) => {
-      Object.keys(row).forEach((key, i) => {
-        const value = String(row[key]);
-        acc[i] = Math.max(acc[i] || 0, value.length, key.length);
-      });
-      return acc;
-    }, []);
-    worksheet['!cols'] = maxWidths.map((w: number) => ({ w: w + 2 }));
+    // Better auto-size
+    const cols = Object.keys(flattenedData[0] || {}).map(key => {
+      const maxLen = Math.max(
+        key.length,
+        ...flattenedData.map(row => String(row[key as keyof typeof row] || '').length)
+      );
+      return { wch: Math.min(maxLen + 2, 50) };
+    });
+    worksheet['!cols'] = cols;
 
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'REPORTE CONTABLE');
-    XLSX.writeFile(workbook, `REPORTE_SAT_${format(new Date(), 'yyyyMMdd_HHmm')}.xlsx`);
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Reporte Fiscal');
+    XLSX.writeFile(workbook, `Reporte_SAT_${format(new Date(), 'yyyyMMdd_HHmm')}.xlsx`);
   };
 
+  const filteredResults = [...results]
+    .filter(r => 
+      r.filename.toLowerCase().includes(filter.toLowerCase()) ||
+      (r.data?.emisorNombre.toLowerCase() || '').includes(filter.toLowerCase()) ||
+      (r.data?.receptorNombre.toLowerCase() || '').includes(filter.toLowerCase()) ||
+      (r.data?.uuid || '').includes(filter.toLowerCase())
+    )
+    .sort((a, b) => {
+      if (!a.data || !b.data) return 0;
+      return new Date(a.data.fecha).getTime() - new Date(b.data.fecha).getTime();
+    });
+
   return (
-    <div className="min-h-screen bg-[#008080] font-sans text-black p-4">
-      <style dangerouslySetInnerHTML={{ __html: `
-        @font-face {
-          font-family: 'Pixel';
-          src: local('Tahoma'), local('Arial');
-        }
-        .retro-bevel {
-          border-top: 2px solid #ffffff;
-          border-left: 2px solid #ffffff;
-          border-right: 2px solid #000000;
-          border-bottom: 2px solid #000000;
-        }
-        .retro-inset {
-          border-top: 2px solid #000000;
-          border-left: 2px solid #000000;
-          border-right: 2px solid #ffffff;
-          border-bottom: 2px solid #ffffff;
-        }
-      `}} />
+    <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
+      {/* Header */}
+      <header className="bg-gold-gradient shadow-xl sticky top-0 z-20">
+        <div className="max-w-7xl mx-auto px-4 h-20 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="bg-white/10 backdrop-blur-md p-2.5 rounded-xl border border-white/20">
+              <FileText className="text-wheat w-7 h-7" />
+            </div>
+            <div>
+              <h1 className="text-2xl font-black tracking-tighter text-white leading-none">
+                ISBB <span className="text-wheat">SOLUCIONES</span>
+              </h1>
+              <p className="text-[10px] text-wheat/70 font-medium uppercase tracking-[0.2em] mt-1">Herramienta Contable Inteligente</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-6">
+            <button 
+              onClick={() => { setResults([]); setFiles([]); }}
+              className="text-sm font-semibold text-wheat/80 hover:text-wheat transition-colors flex items-center gap-2"
+            >
+              <Trash2 className="w-4 h-4" />
+              Limpiar Tablero
+            </button>
+          </div>
+        </div>
+      </header>
 
-      <div className="max-w-6xl mx-auto">
-        
-        {/* Main Application Window */}
-        <div className="bg-[#c0c0c0] retro-bevel shadow-[2px_2px_0px_rgba(0,0,0,1)]">
+      <main className="max-w-7xl mx-auto px-4 py-10">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-10">
           
-          {/* Title Bar */}
-          <div className="bg-gradient-to-r from-[#000080] to-[#1084d0] p-1 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <div className="bg-[#c0c0c0] p-0.5">
-                <FileSearch size={14} className="text-black" />
-              </div>
-              <span className="text-white text-[12px] font-bold tracking-wide">ISBB XML ANALYZER Pro v1.0 [Y2K-LIGHT]</span>
-            </div>
-            <div className="flex gap-1">
-              <button className="bg-[#c0c0c0] retro-bevel w-5 h-[18px] text-[10px] flex items-center justify-center font-bold">_</button>
-              <button className="bg-[#c0c0c0] retro-bevel w-5 h-[18px] text-[10px] flex items-center justify-center font-bold">□</button>
-              <button className="bg-[#c0c0c0] retro-bevel w-5 h-[18px] text-[10px] flex items-center justify-center font-bold text-red-800">X</button>
-            </div>
-          </div>
-
-          {/* Menu Bar */}
-          <div className="flex gap-4 px-2 py-1 border-b border-[#808080] text-[10px]">
-            <span className="cursor-default hover:bg-[#000080] hover:text-white px-1">Archivo</span>
-            <span className="cursor-default hover:bg-[#000080] hover:text-white px-1">Editar</span>
-            <span className="cursor-default hover:bg-[#000080] hover:text-white px-1">Ver</span>
-            <span className="cursor-default hover:bg-[#000080] hover:text-white px-1">Ayuda</span>
-          </div>
-
-          {/* Main Content Area */}
-          <div className="p-4 grid grid-cols-1 md:grid-cols-4 gap-4">
-            
-            {/* Sidebar Controls */}
-            <div className="md:col-span-1 border-r border-[#808080] pr-4 space-y-4">
-              <div className="bg-white retro-inset p-2">
-                <p className="text-[9px] font-bold mb-2 uppercase">Subir Archivos</p>
-                <label className="cursor-pointer bg-[#c0c0c0] retro-bevel p-2 flex flex-col items-center gap-2 hover:bg-[#d0d0d0] active:scale-[0.98]">
-                  <Upload size={24} />
-                  <span className="text-[9px] font-bold">BUSCAR XML...</span>
-                  <input type="file" multiple accept=".xml" className="hidden" onChange={(e) => e.target.files && handleFiles(e.target.files)} />
-                </label>
+          {/* Sidebar - Upload Controls */}
+          <div className="lg:col-span-4 space-y-8">
+            <div className="bg-white p-8 rounded-3xl border border-slate-200 shadow-xl shadow-slate-200/50">
+              <h2 className="text-xl font-bold mb-6 flex items-center gap-3 text-slate-800">
+                <div className="bg-wheat/30 p-2 rounded-lg">
+                  <Upload className="w-5 h-5 text-gold-700" />
+                </div>
+                Cargar Archivos
+              </h2>
+              
+              <div 
+                onClick={() => fileInputRef.current?.click()}
+                className="border-2 border-dashed border-slate-200 rounded-2xl p-10 hover:border-gold-400 hover:bg-gold-50/30 transition-all cursor-pointer flex flex-col items-center justify-center text-center group relative overflow-hidden"
+              >
+                <div className="absolute inset-0 bg-gold-50/0 group-hover:bg-gold-50/10 transition-colors" />
+                <div className="bg-slate-100 p-5 rounded-2xl group-hover:scale-110 transition-transform relative z-10">
+                  <Upload className="w-10 h-10 text-slate-400 group-hover:text-gold-600" />
+                </div>
+                <p className="mt-5 text-sm font-bold text-slate-700 relative z-10">Arrastra archivos aquí</p>
+                <p className="text-xs text-slate-400 mt-2 relative z-10">Soporta múltiples archivos <span className="bg-slate-100 px-1.5 py-0.5 rounded">.xml</span> del SAT</p>
+                <input 
+                  type="file" 
+                  ref={fileInputRef} 
+                  onChange={handleFileChange} 
+                  multiple 
+                  accept=".xml" 
+                  className="hidden" 
+                />
               </div>
 
-              <div className="bg-white retro-inset p-2">
-                <p className="text-[9px] font-bold mb-2 uppercase">Herramientas</p>
-                <div className="flex flex-col gap-2">
+              {files.length > 0 && (
+                <div className="mt-8 space-y-4">
+                  <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+                    <span className="text-sm font-bold text-slate-500 uppercase tracking-wider">{files.length} seleccionados</span>
+                  </div>
+                  <div className="max-h-60 overflow-y-auto space-y-2 pr-2 custom-scrollbar">
+                    {files.map((file, i) => (
+                      <div key={i} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl text-xs group border border-transparent hover:border-gold-200 hover:bg-white transition-all shadow-sm">
+                        <div className="flex items-center gap-2 font-medium text-slate-600">
+                          <FileText className="w-4 h-4 text-gold-500" />
+                          <span className="truncate max-w-[180px]">{file.name}</span>
+                        </div>
+                        <button onClick={() => removeFile(i)} className="text-slate-400 hover:text-red-500 transition-colors">
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <button 
+                    onClick={uploadAndAnalyze}
+                    disabled={loading}
+                    className="w-full bg-slate-900 text-gold font-bold py-4 rounded-2xl shadow-xl shadow-slate-200 hover:bg-slate-800 disabled:opacity-50 transition-all flex items-center justify-center gap-3 mt-6 ring-2 ring-gold/20"
+                  >
+                    {loading ? (
+                      <div className="w-6 h-6 border-3 border-wheat/20 border-t-wheat rounded-full animate-spin" />
+                    ) : (
+                      <>PROCESAR XML <ChevronRight className="w-5 h-5" /></>
+                    )}
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {results.length > 0 && (
+              <div className="bg-slate-900 rounded-3xl p-8 text-white overflow-hidden relative shadow-2xl">
+                <div className="relative z-10">
+                  <div className="flex items-center gap-2 mb-6">
+                    <PieChart className="w-5 h-5 text-wheat" />
+                    <h3 className="text-wheat text-xs font-black uppercase tracking-[0.2em]">Analítica en Vivo</h3>
+                  </div>
+                  <div className="grid grid-cols-2 gap-6">
+                    <div className="bg-white/5 p-4 rounded-2xl border border-white/10">
+                      <p className="text-3xl font-black text-wheat">{results.filter(r => r.status === 'success').length}</p>
+                      <p className="text-wheat/60 text-[10px] font-bold uppercase tracking-wider mt-1">Procesados</p>
+                    </div>
+                    <div className="bg-white/5 p-4 rounded-2xl border border-white/10">
+                      <p className="text-3xl font-black text-red-400">{results.filter(r => r.status === 'error').length}</p>
+                      <p className="text-wheat/60 text-[10px] font-bold uppercase tracking-wider mt-1">Errores</p>
+                    </div>
+                  </div>
                   <button 
                     onClick={exportToExcel}
-                    disabled={results.length === 0}
-                    className="bg-[#c0c0c0] retro-bevel p-2 text-[9px] font-bold flex items-center gap-2 disabled:opacity-50 active:scale-[0.98]"
+                    className="mt-8 w-full bg-wheat text-slate-900 py-4 rounded-2xl font-black flex items-center justify-center gap-3 hover:bg-white transition-all shadow-lg text-sm uppercase tracking-wider"
                   >
-                    <Save size={14} /> GENERAR.XLS
-                  </button>
-                  <button 
-                    onClick={() => setResults([])}
-                    disabled={results.length === 0}
-                    className="bg-[#c0c0c0] retro-bevel p-2 text-[9px] font-bold flex items-center gap-2 disabled:opacity-50 active:scale-[0.98]"
-                  >
-                    <Trash2 size={14} /> BORRAR LISTA
+                    <Download className="w-5 h-5" /> Generar Excel
                   </button>
                 </div>
+                <div className="absolute top-0 right-0 -mr-12 -mt-12 w-48 h-48 bg-wheat/10 rounded-full blur-3xl" />
+                <div className="absolute bottom-0 left-0 -ml-12 -mb-12 w-48 h-48 bg-gold-900/40 rounded-full blur-3xl font-bold" />
               </div>
+            )}
+          </div>
 
-              <div className="mt-4 p-2 bg-[#ffffcc] border border-[#808080] text-[9px] font-medium">
-                <div className="flex items-center gap-1 mb-1">
-                  <Info size={10} />
-                  <span className="font-bold uppercase">NOTAS:</span>
+          {/* Main Content - Results Table */}
+          <div className="lg:col-span-8 space-y-8">
+            {!results.length ? (
+              <div className="h-[650px] bg-white rounded-3xl border border-slate-200 flex flex-col items-center justify-center text-center p-12 shadow-sm border-dashed">
+                <div className="bg-wheat/10 p-8 rounded-full mb-8">
+                  <TableIcon className="w-16 h-16 text-wheat-dark" />
                 </div>
-                <p>Versión optimizada para bajo consumo de recursos. Procesamiento 100% servidor.</p>
+                <h3 className="text-3xl font-black text-slate-800 mb-3 tracking-tight">Sin Reportes</h3>
+                <p className="text-slate-400 max-w-sm text-sm leading-relaxed font-medium">
+                  ISBB SOLUCIONES procesa tus archivos XML de forma local y segura. Carga tus facturas para comenzar.
+                </p>
               </div>
-            </div>
-
-            {/* Results Grid / Table */}
-            <div className="md:col-span-3 space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Monitor size={16} />
-                  <span className="text-[11px] font-bold">MONITOR DE PROCESAMIENTO</span>
+            ) : (
+              <motion.div 
+                initial={{ opacity: 0, y: 30 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="bg-white rounded-3xl border border-slate-200 shadow-xl shadow-slate-200/50 overflow-hidden"
+              >
+                <div className="p-8 border-b border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-6 bg-slate-50/50">
+                  <div>
+                    <h3 className="text-2xl font-black text-slate-800 tracking-tight transition-all">Consolidado Fiscal</h3>
+                    <p className="text-xs text-slate-400 font-bold mt-1 uppercase tracking-widest italic">Registros procesados en tiempo real</p>
+                  </div>
+                  <div className="relative group max-w-md w-full">
+                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 group-focus-within:text-gold-600 transition-colors" />
+                    <input 
+                      type="text" 
+                      placeholder="Buscar por RFC, Nombre, UUID..." 
+                      value={filter}
+                      onChange={(e) => setFilter(e.target.value)}
+                      className="w-full pl-12 pr-5 py-3.5 border border-slate-200 rounded-2xl text-sm font-medium focus:outline-none focus:ring-4 focus:ring-gold-500/10 focus:border-gold-400 transition-all bg-white shadow-inner"
+                    />
+                  </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-[9px] font-bold">FILTRAR:</span>
-                  <input 
-                    type="text" 
-                    value={filter}
-                    onChange={(e) => setFilter(e.target.value)}
-                    className="retro-inset bg-white px-2 py-0.5 text-[10px] focus:outline-none w-32" 
-                  />
-                </div>
-              </div>
 
-              <div className="bg-white retro-inset h-[400px] overflow-auto">
-                <table className="w-full text-left text-[10px] border-collapse">
-                  <thead className="bg-[#c0c0c0] border-b border-black sticky top-0 z-20">
-                    <tr>
-                      <th className="border-r border-[#808080] px-2 py-1">Fecha</th>
-                      <th className="border-r border-[#808080] px-2 py-1">Folio</th>
-                      <th className="border-r border-[#808080] px-2 py-1">RFC Emisor</th>
-                      <th className="border-r border-[#808080] px-2 py-1">Concepto</th>
-                      <th className="border-r border-[#808080] px-2 py-1 text-right">IVA</th>
-                      <th className="border-r border-[#808080] px-2 py-1 text-right">Monto Total</th>
-                      <th className="px-2 py-1">Estatus</th>
-                    </tr>
-                  </thead>
-                  <tbody className="font-mono">
-                    {results.length > 0 ? (
-                      [...results]
-                        .filter(r => 
-                          r.filename.toLowerCase().includes(filter.toLowerCase()) || 
-                          r.data?.emisorRfc.toLowerCase().includes(filter.toLowerCase()) ||
-                          r.data?.emisorNombre.toLowerCase().includes(filter.toLowerCase()) ||
-                          r.data?.conceptos.toLowerCase().includes(filter.toLowerCase())
-                        )
-                        .sort((a, b) => {
-                          if (!a.data || !b.data) return 0;
-                          return new Date(a.data.fecha).getTime() - new Date(b.data.fecha).getTime();
-                        })
-                        .map((result, idx) => (
-                        <tr key={idx} className="border-b border-[#eeeeee] hover:bg-[#e0e0f0]">
-                          <td className="border-r border-[#eeeeee] px-2 py-1 whitespace-nowrap">
-                            {result.data?.fecha ? format(parseISO(result.data.fecha), 'dd/MM/yy') : '-'}
-                          </td>
-                          <td className="border-r border-[#eeeeee] px-2 py-1">
-                            {result.data?.folio || '-'}
-                          </td>
-                          <td className="border-r border-[#eeeeee] px-2 py-1 uppercase truncate max-w-[100px]">
-                            {result.data?.emisorRfc || 'N/A'}
-                          </td>
-                          <td className="border-r border-[#eeeeee] px-2 py-1 truncate max-w-[200px]">
-                            {result.data?.conceptos || result.error || 'N/A'}
-                          </td>
-                          <td className="border-r border-[#eeeeee] px-2 py-1 text-right">
-                            ${(result.data?.impuestos.ivaTrasladado || 0).toFixed(2)}
-                          </td>
-                          <td className="border-r border-[#eeeeee] px-2 py-1 text-right font-bold">
-                            ${(result.data?.total || 0).toFixed(2)}
-                          </td>
-                          <td className="px-2 py-1">
-                            {result.status === 'success' ? (
-                              <span className="text-green-700 font-bold">[OK]</span>
-                            ) : (
-                              <span className="text-red-700 font-bold">[ERR]</span>
-                            )}
-                          </td>
-                        </tr>
-                      ))
-                    ) : (
+                <div className="overflow-x-auto custom-scrollbar">
+                  <table className="w-full text-left border-collapse min-w-[800px]">
+                    <thead className="bg-slate-900 border-b border-white/10">
                       <tr>
-                        <td colSpan={7} className="p-20 text-center text-[#808080] italic text-[11px] font-sans">
-                          &lt; SISTEMA LISTO PARA CARGA &gt;<br/>
-                          (Arrastre archivos XML para analizar)
-                        </td>
+                        <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em]">Estado</th>
+                        <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em]">Participantes</th>
+                        <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em]">Temporalidad</th>
+                        <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em] text-right">Subtotal</th>
+                        <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em] text-right">Impuestos</th>
+                        <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em] text-right">Total MXN</th>
                       </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-
-              {/* Totals Section */}
-              <div className="bg-[#ffffcc] retro-inset p-3 flex flex-wrap gap-8 justify-end text-[11px]">
-                  <div className="flex flex-col items-end">
-                    <span className="text-[9px] font-bold text-slate-500 uppercase">Subtotal Acumulado</span>
-                    <span className="font-mono font-bold">
-                      ${results.reduce((acc, curr) => acc + (curr.data?.subtotal || 0), 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                    </span>
-                  </div>
-                  <div className="flex flex-col items-end">
-                    <span className="text-[9px] font-bold text-slate-500 uppercase">IVA Acumulado</span>
-                    <span className="font-mono font-bold text-blue-800">
-                      ${results.reduce((acc, curr) => acc + (curr.data?.impuestos.ivaTrasladado || 0), 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                    </span>
-                  </div>
-                  <div className="flex flex-col items-end">
-                    <span className="text-[9px] font-bold text-slate-500 uppercase">Total General</span>
-                    <span className="font-mono font-bold text-lg leading-none mt-1">
-                      ${results.reduce((acc, curr) => acc + (curr.data?.total || 0), 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                    </span>
-                  </div>
-              </div>
-
-              {/* Status Bar */}
-              <div className="bg-[#c0c0c0] retro-inset p-0.5 text-[9px] flex gap-2">
-                <div className="bg-[#c0c0c0] border border-inset border-[#808080] px-2 flex-1 shadow-[inset_1px_1px_0px_#000]">
-                  Registros: {results.length}
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      <AnimatePresence mode='popLayout'>
+                        {filteredResults.map((result, idx) => (
+                          <motion.tr 
+                            layout
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            exit={{ opacity: 0 }}
+                            key={result.data?.uuid || idx} 
+                            className="hover:bg-gold-50/20 transition-colors group cursor-default"
+                          >
+                            <td className="px-8 py-6">
+                              {result.status === 'success' ? (
+                                <div className="bg-emerald-50 w-10 h-10 rounded-full flex items-center justify-center border border-emerald-100 shadow-sm">
+                                  <CheckCircle2 className="w-6 h-6 text-emerald-500" />
+                                </div>
+                              ) : (
+                                <div className="bg-red-50 w-10 h-10 rounded-full flex items-center justify-center border border-red-100 shadow-sm">
+                                  <AlertCircle className="w-6 h-6 text-red-500" />
+                                </div>
+                              )}
+                            </td>
+                            <td className="px-8 py-6">
+                              {result.status === 'success' ? (
+                                <div className="space-y-1.5">
+                                  <div className="text-sm font-black text-slate-800 truncate max-w-[220px]" title={`Emisor: ${result.data?.emisorNombre}`}>
+                                    <span className="text-gold-600 font-black text-[9px] mr-2 bg-gold-50 px-1.5 py-0.5 rounded border border-gold-200">E</span>
+                                    {result.data?.emisorNombre}
+                                  </div>
+                                  <div className="text-xs text-slate-500 font-bold truncate max-w-[220px]" title={`Receptor: ${result.data?.receptorNombre}`}>
+                                    <span className="text-slate-400 font-black text-[9px] mr-2 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">R</span>
+                                    {result.data?.receptorNombre}
+                                  </div>
+                                </div>
+                              ) : (
+                                <span className="text-xs text-red-500 font-black italic">{result.error}</span>
+                              )}
+                            </td>
+                            <td className="px-8 py-6">
+                              {result.status === 'success' && (
+                                <div className="space-y-2">
+                                  <div className="text-xs font-black text-slate-700 tracking-tight">
+                                    {result.data?.fecha ? format(new Date(result.data.fecha), 'dd MMM, yyyy') : 'N/A'}
+                                  </div>
+                                  <div className="inline-flex px-3 py-1 rounded-lg text-[9px] bg-slate-900 text-wheat font-black uppercase tracking-widest shadow-sm">
+                                    {result.data?.tipo}
+                                  </div>
+                                </div>
+                              )}
+                            </td>
+                            <td className="px-8 py-6 text-right whitespace-nowrap">
+                              <span className="text-sm font-black text-slate-600">
+                                {result.status === 'success' && result.data ? `$${result.data.subtotal.toLocaleString('es-MX', { minimumFractionDigits: 2 })}` : '-'}
+                              </span>
+                            </td>
+                            <td className="px-8 py-6 text-right whitespace-nowrap">
+                              <div className="space-y-1 bg-white/50 p-2 rounded-xl border border-slate-100">
+                                {result.status === 'success' && result.data?.impuestos?.desglose?.iva16 !== 0 && (
+                                  <div className="text-[10px] font-black text-emerald-700 uppercase">IVA 16%: <span className="text-slate-900">${result.data?.impuestos?.desglose?.iva16?.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span></div>
+                                )}
+                                {result.status === 'success' && result.data?.impuestos?.desglose?.iva8 !== 0 && (
+                                  <div className="text-[10px] font-black text-emerald-700 uppercase">IVA 8%: <span className="text-slate-900">${result.data?.impuestos?.desglose?.iva8?.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span></div>
+                                )}
+                                {result.status === 'success' && result.data?.impuestos?.desglose?.ieps !== 0 && (
+                                  <div className="text-[10px] font-black text-blue-700 uppercase">IEPS: <span className="text-slate-900">${result.data?.impuestos?.desglose?.ieps?.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span></div>
+                                )}
+                                {result.status === 'success' && result.data?.impuestos?.desglose?.retIVA !== 0 && (
+                                  <div className="text-[10px] font-black text-red-700 uppercase">Ret IVA: <span className="text-slate-900">-${result.data?.impuestos?.desglose?.retIVA?.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span></div>
+                                )}
+                                {result.status === 'success' && result.data?.impuestos?.desglose?.retISR !== 0 && (
+                                  <div className="text-[10px] font-black text-red-700 uppercase">Ret ISR: <span className="text-slate-900">-${result.data?.impuestos?.desglose?.retISR?.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span></div>
+                                )}
+                                {result.status === 'success' && result.data?.impuestos?.desglose?.ivaExento !== 0 && (
+                                  <div className="text-[10px] font-black text-slate-500 uppercase">Exento: <span className="text-slate-900">${result.data?.impuestos?.desglose?.ivaExento?.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span></div>
+                                )}
+                                {result.status === 'success' && result.data?.impuestos?.desglose?.baseNoObjeto !== 0 && (
+                                  <div className="text-[10px] font-black text-slate-500 uppercase">No Objeto: <span className="text-slate-900">${result.data?.impuestos?.desglose?.baseNoObjeto?.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span></div>
+                                )}
+                              </div>
+                            </td>
+                            <td className="px-8 py-6 text-right whitespace-nowrap">
+                              <div className="inline-flex flex-col items-end">
+                                <span className="text-lg font-black text-slate-900 tracking-tighter">
+                                  {result.status === 'success' && result.data ? `$${result.data.total.toLocaleString('es-MX', { minimumFractionDigits: 2 })}` : '-'}
+                                </span>
+                                <span className="text-[8px] font-black text-gold-600 uppercase tracking-widest mt-0.5">Monto Total</span>
+                              </div>
+                            </td>
+                          </motion.tr>
+                        ))}
+                      </AnimatePresence>
+                    </tbody>
+                  </table>
                 </div>
-                <div className="bg-[#c0c0c0] border border-inset border-[#808080] px-3 shadow-[inset_1px_1px_0px_#000]">
-                  Ver: 1.0.4-L
-                </div>
-                <div className="bg-[#c0c0c0] border border-inset border-[#808080] px-3 flex items-center gap-1 shadow-[inset_1px_1px_0px_#000]">
-                  <MousePointer2 size={10} /> {loading ? 'PROCESANDO...' : 'SISTEMA'}
-                </div>
-              </div>
-            </div>
+              </motion.div>
+            )}
           </div>
         </div>
+      </main>
 
-        {/* Desktop Icons */}
-        <div className="mt-8 flex gap-10">
-          <div className="flex flex-col items-center gap-1">
-            <div className="bg-[#c0c0c0] p-1 border-2 border-white shadow-md cursor-pointer hover:bg-[#d0d0d0]">
-              <Monitor size={40} className="text-blue-900" />
-            </div>
-            <span className="text-white text-[10px] font-bold [text-shadow:_1px_1px_0_rgb(0_0_0_/_40%)]">MI COMPUTADORA</span>
-          </div>
-          <div className="flex flex-col items-center gap-1">
-            <div className="bg-[#c0c0c0] p-1 border-2 border-white shadow-md cursor-pointer hover:bg-[#d0d0d0]">
-              <Trash2 size={40} className="text-slate-700" />
-            </div>
-            <span className="text-white text-[10px] font-bold [text-shadow:_1px_1px_0_rgb(0_0_0_/_40%)]">PAPELERA</span>
-          </div>
+      <footer className="bg-slate-900 py-16 text-center border-t-4 border-wheat">
+        <div className="max-w-7xl mx-auto px-4">
+          <h2 className="text-3xl font-black text-white tracking-tighter mb-4">
+            ISBB <span className="text-wheat">SOLUCIONES</span>
+          </h2>
+          <p className="text-wheat/40 text-xs font-bold uppercase tracking-[0.4em]">
+            Inteligencia Contable & Soluciones Fiscales Avanzadas
+          </p>
+          <div className="w-12 h-1 bg-wheat mx-auto my-8 rounded-full opacity-30" />
+          <p className="text-white/20 text-[10px] font-medium tracking-wider">
+            © {new Date().getFullYear()} ISBB SOLUCIONES - Plataforma de análisis técnico de CFDIs SAT v3.3/4.0
+          </p>
         </div>
-
-      </div>
-
-      {/* Taskbar */}
-      <div className="fixed bottom-0 left-0 right-0 h-9 bg-[#c0c0c0] border-t-2 border-white flex items-center justify-between px-1 shadow-[0_-1px_0px_black,inset_1px_1px_0px_white]">
-        <div className="flex gap-1 h-full py-1">
-          <button className="bg-[#c0c0c0] retro-bevel flex items-center gap-1 px-3 shadow-[1px_1px_0px_black] active:scale-[0.98] hover:bg-[#d0d0d0]">
-            <div className="bg-gradient-to-br from-green-500 to-green-800 p-0.5 rounded-sm">
-               <Monitor size={12} className="text-white" />
-            </div>
-            <span className="font-bold text-[13px] italic tracking-tighter leading-none">Inicio</span>
-          </button>
-          <div className="w-[1.5px] h-full bg-[#808080] border-l border-white mx-1" />
-          <div className="flex items-center gap-2 px-3 retro-inset bg-[#ececec]">
-            <FileText size={14} className="text-blue-900" />
-            <span className="text-[11px] font-bold truncate max-w-[100px]">ISBB XML...</span>
-          </div>
-        </div>
-        <div className="retro-inset px-4 h-full flex items-center gap-3 bg-[#c0c0c0]">
-          {loading && <Loader2 size={12} className="animate-spin text-blue-900" />}
-          <span className="text-[11px] font-bold tabular-nums">{format(new Date(), 'HH:mm')}</span>
-        </div>
-      </div>
+      </footer>
     </div>
   );
 }
+

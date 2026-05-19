@@ -1,8 +1,6 @@
 {
-  "name": "ISBB Retro-Analyzer",
-  "description": "Herramienta contable ligera estilo retro para análisis de CFDIs SAT con exportación a Excel.",
+  "name": "ISBB SOLUCIONES",
+  "description": "Herramienta contable profesional para el análisis técnico de CFDIs del SAT y generación de reportes avanzados.",
   "requestFramePermissions": [],
-  "majorCapabilities": [
-    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
-  ]
+  "majorCapabilities": []
 }
