@@ -16,6 +16,8 @@ import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
 import { format } from 'date-fns';
 import { CFDIData } from './lib/xmlParser';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
 
 interface AnalysisResult {
   filename: string;
@@ -181,6 +183,51 @@ export default function App() {
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Reporte Fiscal');
     XLSX.writeFile(workbook, `Reporte_SAT_${format(new Date(), 'yyyyMMdd_HHmm')}.xlsx`);
+  };
+
+  const exportToPDF = () => {
+    const validResults = results.filter(r => r.status === 'success' && r.data);
+    if (validResults.length === 0) {
+      alert('No hay datos válidos para exportar.');
+      return;
+    }
+
+    const doc = new jsPDF('l', 'mm', 'a4');
+    
+    // Add title
+    doc.setFontSize(18);
+    doc.setTextColor(15, 23, 42); // slate-900
+    doc.text('ISBB SOLUCIONES - Reporte Fiscal SAT', 14, 15);
+    
+    doc.setFontSize(10);
+    doc.setTextColor(100);
+    doc.text(`Fecha de reporte: ${format(new Date(), 'dd/MM/yyyy HH:mm:ss')}`, 14, 22);
+
+    const tableData = validResults.map(r => [
+      format(new Date(r.data!.fecha), 'dd/MM/yy'),
+      r.data!.emisorNombre,
+      r.data!.receptorNombre,
+      r.data!.uuid.substring(0, 8) + '...',
+      `$${r.data!.subtotal.toLocaleString()}`,
+      `$${r.data!.impuestos.totalTrasladados.toLocaleString()}`,
+      `$${r.data!.total.toLocaleString()}`
+    ]);
+
+    autoTable(doc, {
+      startY: 30,
+      head: [['Fecha', 'Emisor', 'Receptor', 'UUID', 'Subtotal', 'Impuestos', 'Total']],
+      body: tableData,
+      theme: 'grid',
+      headStyles: { fillColor: [15, 23, 42], textColor: [222, 184, 135] }, // slate-900 and wheat
+      styles: { fontSize: 8, cellPadding: 3 },
+      columnStyles: {
+        4: { halign: 'right' },
+        5: { halign: 'right' },
+        6: { halign: 'right' },
+      }
+    });
+
+    doc.save(`Reporte_SAT_${format(new Date(), 'yyyyMMdd_HHmm')}.pdf`);
   };
 
   const filteredResults = [...results]
@@ -355,12 +402,20 @@ export default function App() {
                       <p className="text-wheat/60 text-[10px] font-bold uppercase tracking-wider mt-1">Errores</p>
                     </div>
                   </div>
-                  <button 
-                    onClick={exportToExcel}
-                    className="mt-8 w-full bg-wheat text-slate-900 py-4 rounded-2xl font-black flex items-center justify-center gap-3 hover:bg-white transition-all shadow-lg text-sm uppercase tracking-wider"
-                  >
-                    <Download className="w-5 h-5" /> Generar Excel
-                  </button>
+                  <div className="grid grid-cols-1 gap-4 mt-8">
+                    <button 
+                      onClick={exportToExcel}
+                      className="w-full bg-wheat text-slate-900 py-4 rounded-2xl font-black flex items-center justify-center gap-3 hover:bg-white transition-all shadow-lg text-sm uppercase tracking-wider"
+                    >
+                      <Download className="w-5 h-5" /> Generar Excel
+                    </button>
+                    <button 
+                      onClick={exportToPDF}
+                      className="w-full bg-slate-800 text-wheat py-4 rounded-2xl font-black flex items-center justify-center gap-3 hover:bg-slate-700 transition-all shadow-lg text-sm uppercase tracking-wider border border-wheat/20"
+                    >
+                      <FileText className="w-5 h-5" /> Generar PDF
+                    </button>
+                  </div>
                 </div>
                 <div className="absolute top-0 right-0 -mr-12 -mt-12 w-48 h-48 bg-wheat/10 rounded-full blur-3xl" />
                 <div className="absolute bottom-0 left-0 -ml-12 -mb-12 w-48 h-48 bg-gold-900/40 rounded-full blur-3xl font-bold" />
@@ -525,7 +580,7 @@ export default function App() {
           </p>
           <div className="w-12 h-1 bg-wheat mx-auto my-8 rounded-full opacity-30" />
           <p className="text-white/20 text-[10px] font-medium tracking-wider">
-            © {new Date().getFullYear()} ISBB SOLUCIONES - v4.0 STABLE
+            © {new Date().getFullYear()} ISBB SOLUCIONES - v4.1 STABLE (PDF+)
           </p>
         </div>
       </footer>
