@@ -1,6 +1,6 @@
 {
   "name": "ISBB SOLUCIONES",
-  "description": "Herramienta contable impulsada por AI para análisis de CFDIs SAT y lectura inteligente de estados de cuenta bancarios con exportación a Excel.",
+  "description": "Herramienta contable impulsada por AI para procesamiento de reportes y análisis de CFDIs SAT con exportación a Excel.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
