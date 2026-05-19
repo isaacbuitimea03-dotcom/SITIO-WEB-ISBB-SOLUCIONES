@@ -2,5 +2,5 @@
   "name": "ISBB SOLUCIONES",
   "description": "Herramienta contable profesional para el análisis técnico de CFDIs del SAT y generación de reportes avanzados.",
   "requestFramePermissions": [],
-  "majorCapabilities": []
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

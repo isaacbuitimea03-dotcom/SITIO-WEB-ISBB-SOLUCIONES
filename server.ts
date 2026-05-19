@@ -5,7 +5,13 @@ import { createServer as createViteServer } from 'vite';
 import { parseCFDI } from './src/lib/xmlParser.js';
 import cors from 'cors';
 
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({ 
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 50 * 1024 * 1024, // 50MB per file
+    files: 500 // Max 500 files at once
+  }
+});
 
 interface MulterRequest extends Request {
   files: any;
@@ -16,25 +22,42 @@ async function startServer() {
   const PORT = 3000;
 
   app.use(cors());
-  app.use(express.json());
+  app.use(express.json({ limit: '50mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
   // API Routes
-  app.post('/api/analyze-xml', upload.array('files'), (req: Request, res: Response) => {
+  app.post('/api/analyze-xml', (req, res, next) => {
+    upload.array('files')(req, res, (err) => {
+      if (err instanceof multer.MulterError) {
+        console.error('Multer error:', err);
+        return res.status(400).json({ error: `Error de carga: ${err.message}` });
+      } else if (err) {
+        console.error('Unknown upload error:', err);
+        return res.status(500).json({ error: 'Error interno al cargar archivos' });
+      }
+      next();
+    });
+  }, (req: Request, res: Response) => {
     try {
       const files = (req as MulterRequest).files as Express.Multer.File[];
+      
+      console.log(`Received request to analyze ${files?.length || 0} files`);
+
       if (!files || files.length === 0) {
-        return res.status(400).json({ error: 'No files uploaded' });
+        return res.status(400).json({ error: 'No se subieron archivos' });
       }
 
       const results = files.map(file => {
         try {
           const xmlContent = file.buffer.toString('utf-8');
+          const parsedData = parseCFDI(xmlContent);
           return {
             filename: file.originalname,
-            data: parseCFDI(xmlContent),
+            data: parsedData,
             status: 'success'
           };
         } catch (error: any) {
+          console.error(`Error parsing file ${file.originalname}:`, error.message);
           return {
             filename: file.originalname,
             error: error.message,
@@ -45,6 +68,7 @@ async function startServer() {
 
       res.json(results);
     } catch (error: any) {
+      console.error('Global API error:', error);
       res.status(500).json({ error: error.message });
     }
   });

@@ -53,10 +53,23 @@ export default function App() {
         method: 'POST',
         body: formData,
       });
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ error: 'Error desconocido en el servidor' }));
+        alert(`Error: ${errorData.error || response.statusText}`);
+        return;
+      }
+
       const data = await response.json();
-      setResults(data);
+      if (Array.isArray(data)) {
+        setResults(data);
+      } else {
+        console.error('Data is not an array:', data);
+        alert('El servidor devolvió un formato de datos inesperado.');
+      }
     } catch (error) {
       console.error('Error analyzing files:', error);
+      alert('Error de conexión con el servidor. Por favor, intente de nuevo.');
     } finally {
       setLoading(false);
     }

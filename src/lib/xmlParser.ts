@@ -94,25 +94,37 @@ export const parseCFDI = (xmlContent: string): CFDIData => {
   });
 
   const jsonObj = parser.parse(xmlContent);
-  const comprobante = jsonObj['cfdi:Comprobante'] || jsonObj['Comprobante'] || jsonObj['CfdiComprobante'];
+  
+  // Find Comprobante even with different prefixes or case
+  const findNode = (obj: any, target: string): any => {
+    if (!obj) return undefined;
+    const lowerTarget = target.toLowerCase();
+    for (const key of Object.keys(obj)) {
+      if (key.toLowerCase() === lowerTarget || key.toLowerCase().endsWith(':' + lowerTarget)) {
+        return obj[key];
+      }
+    }
+    return undefined;
+  };
+
+  const comprobante = findNode(jsonObj, 'Comprobante');
 
   if (!comprobante) {
     console.error('JSON Structure:', jsonObj);
-    throw new Error('No se encontró el nodo principal del Comprobante');
+    throw new Error('No se encontró el nodo Comprobante en el XML. Asegúrese de que sea un CFDI válido.');
   }
 
   // Helper to get attribute or node regardless of case, prefix or SAT namespace
   const getAttr = (node: any, name: string) => {
     if (!node) return undefined;
-    const searchNames = [
-      name,
-      name.toLowerCase(),
-      name.charAt(0).toUpperCase() + name.slice(1),
-      `cfdi:${name}`,
-      `tfd:${name}`
-    ];
-    for (const n of searchNames) {
-      if (node[n] !== undefined) return node[n];
+    const lowerName = name.toLowerCase();
+    
+    // Check direct properties first (attributes or nodes)
+    for (const key of Object.keys(node)) {
+      const lowerKey = key.toLowerCase();
+      if (lowerKey === lowerName || lowerKey.endsWith(':' + lowerName)) {
+        return node[key];
+      }
     }
     return undefined;
   };
@@ -142,8 +154,8 @@ export const parseCFDI = (xmlContent: string): CFDIData => {
   // Process Impuestos
   const impuestosWrapper = getAttr(comprobante, 'Impuestos') || {};
   
-  const traslados = impuestosWrapper['cfdi:Traslados'] || impuestosWrapper['Traslados'] || {};
-  const trasladosList = traslados['cfdi:Traslado'] || traslados['Traslado'] || [];
+  const traslados = getAttr(impuestosWrapper, 'Traslados') || {};
+  const trasladosList = getAttr(traslados, 'Traslado') || [];
   const normalizedTraslados = (Array.isArray(trasladosList) ? trasladosList : [trasladosList]).map((t: any) => ({
     impuesto: String(getAttr(t, 'Impuesto')),
     tasa: getAttr(t, 'TasaOCuota') !== undefined ? `${(Number(getAttr(t, 'TasaOCuota')) * 100).toFixed(2)}%` : 'N/A',
@@ -151,8 +163,8 @@ export const parseCFDI = (xmlContent: string): CFDIData => {
     importe: Number(getAttr(t, 'Importe') || 0),
   }));
 
-  const retenidos = impuestosWrapper['cfdi:Retenciones'] || impuestosWrapper['Retenciones'] || {};
-  const retenidosList = retenidos['cfdi:Retencion'] || retenidos['Retencion'] || [];
+  const retenidos = getAttr(impuestosWrapper, 'Retenciones') || {};
+  const retenidosList = getAttr(retenidos, 'Retencion') || [];
   const normalizedRetenidos = (Array.isArray(retenidosList) ? retenidosList : [retenidosList]).map((r: any) => ({
     impuesto: String(getAttr(r, 'Impuesto')),
     tasa: getAttr(r, 'TasaOCuota') !== undefined ? `${(Number(getAttr(r, 'TasaOCuota')) * 100).toFixed(2)}%` : 'N/A',
