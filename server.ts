@@ -34,56 +34,35 @@ app.use((req, res, next) => {
 });
 
 // API Routes (Defined on the app object directly)
-app.get('/api/debug', (req, res) => {
-  res.json({
-    url: req.url,
-    originalUrl: req.originalUrl,
-    path: req.path,
-    query: req.query,
-    headers: req.headers,
-    method: req.method
-  });
-});
-
-app.get('/api/health', (req, res) => {
+  app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'ok', 
-    version: '3.9.0',
-    time: new Date().toISOString(),
-    platform: process.env.VERCEL ? 'Vercel' : 'Standard',
-    env: process.env.NODE_ENV,
-    cwd: process.cwd()
+    time: new Date().toISOString()
   });
 });
 
 app.post('/api/analyze-xml', upload.array('files'), (req: Request, res: Response) => {
-  console.log('[XML] Analizando petición POST...');
   try {
     const files = (req as MulterRequest).files as Express.Multer.File[];
     if (!files || files.length === 0) {
-      console.warn('[XML] No se recibieron archivos');
       return res.status(400).json({ error: 'No se subieron archivos XML' });
     }
 
-    console.log(`[XML] Procesando ${files.length} archivos`);
     const results = files.map(file => {
       try {
         const xmlContent = file.buffer.toString('utf-8');
-        const data = parseCFDI(xmlContent);
         return {
           filename: file.originalname,
-          data,
+          data: parseCFDI(xmlContent),
           status: 'success'
         };
       } catch (error: any) {
-        console.error(`[XML] Error en ${file.originalname}:`, error.message);
         return { filename: file.originalname, error: error.message, status: 'error' };
       }
     });
 
     res.json(results);
   } catch (error: any) {
-    console.error('[XML] Error global:', error);
     res.status(500).json({ error: 'Error interno del servidor', details: error.message });
   }
 });

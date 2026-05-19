@@ -83,33 +83,18 @@ export default function App() {
     xmlFiles.forEach(file => formData.append('files', file));
 
     try {
-      console.log('[API] Sending request to /api/analyze-xml...');
       const response = await fetch('/api/analyze-xml', {
         method: 'POST',
         body: formData,
       });
       
-      console.log(`[API] Response status: ${response.status} (${response.statusText})`);
       const contentType = response.headers.get('content-type');
-      console.log(`[API] Content-Type: ${contentType}`);
 
       if (!response.ok) {
-        let errorMessage = `Error del servidor: ${response.status}`;
-        try {
-          if (contentType && contentType.includes('application/json')) {
-            const errData = await response.json();
-            errorMessage = errData.error || errData.details || errorMessage;
-          } else {
-            const text = await response.text();
-            console.error('[API] Non-JSON error response:', text);
-            // Si el texto es HTML (común en 404 de Vercel), tratar de extraer el título
-            if (text.includes('<title>')) {
-              const titleMatch = text.match(/<title>(.*?)<\/title>/);
-              if (titleMatch) errorMessage = `Error: ${titleMatch[1]} (${response.status})`;
-            }
-          }
-        } catch (e) {
-          console.error('[API] Error parsing error response:', e);
+        let errorMessage = `Error: ${response.status}`;
+        if (contentType && contentType.includes('application/json')) {
+          const errData = await response.json();
+          errorMessage = errData.error || errorMessage;
         }
         throw new Error(errorMessage);
       }
@@ -119,12 +104,9 @@ export default function App() {
         setResults(data);
         setShowSuccess(true);
         setTimeout(() => setShowSuccess(false), 3000);
-      } else {
-        throw new Error('La respuesta del servidor no es un JSON válido');
       }
     } catch (error: any) {
-      console.error('[API] Catch error:', error);
-      alert(`${error.message}\n\nDetalles: Si el error es 404, contacta a soporte.`);
+      alert(error.message || 'Error al conectar con el servidor');
     } finally {
       setLoading(false);
     }
@@ -543,7 +525,7 @@ export default function App() {
           </p>
           <div className="w-12 h-1 bg-wheat mx-auto my-8 rounded-full opacity-30" />
           <p className="text-white/20 text-[10px] font-medium tracking-wider">
-            © {new Date().getFullYear()} ISBB SOLUCIONES - v3.9 STABLE (API DIAG)
+            © {new Date().getFullYear()} ISBB SOLUCIONES - v4.0 STABLE
           </p>
         </div>
       </footer>
