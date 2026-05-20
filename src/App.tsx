@@ -1,435 +1,262 @@
 import React, { useState, useRef } from 'react';
 import { 
-  FileText, 
-  Upload, 
-  Download, 
-  Table as TableIcon, 
-  PieChart, 
-  AlertCircle, 
-  CheckCircle2,
-  Trash2,
-  ChevronRight,
-  Search,
-  Filter
+  FileSpreadsheet, 
+  ExternalLink, 
+  RefreshCw, 
+  Copy, 
+  Check, 
+  Sparkles, 
+  CloudLightning, 
+  ShieldCheck, 
+  Monitor, 
+  HelpCircle,
+  FileText
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import * as XLSX from 'xlsx';
-import { format } from 'date-fns';
-import { CFDIData } from './lib/xmlParser';
-
-interface AnalysisResult {
-  filename: string;
-  data?: CFDIData;
-  error?: string;
-  status: 'success' | 'error';
-}
 
 export default function App() {
-  const [files, setFiles] = useState<File[]>([]);
-  const [results, setResults] = useState<AnalysisResult[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [filter, setFilter] = useState('');
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const appScriptUrl = 'https://script.google.com/macros/s/AKfycbyQ6utU_Qd7RwtVkLe7wh_7y1ws47t0Qplyyb2lazMRdYS9WR-njmM7CjjkhI2NRMKx/exec';
+  const [iframeKey, setIframeKey] = useState(0);
+  const [copied, setCopied] = useState(false);
+  const [loading, setLoading] = useState(true);
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) {
-      setFiles(prev => [...prev, ...Array.from(e.target.files || [])]);
-    }
-  };
-
-  const removeFile = (index: number) => {
-    setFiles(prev => prev.filter((_, i) => i !== index));
-  };
-
-  const uploadAndAnalyze = async () => {
-    if (files.length === 0) return;
+  const handleRefresh = () => {
     setLoading(true);
-    
-    const formData = new FormData();
-    files.forEach(file => formData.append('files', file));
-
-    try {
-      const response = await fetch('/api/analyze-xml', {
-        method: 'POST',
-        body: formData,
-      });
-      
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: 'Error desconocido en el servidor' }));
-        alert(`Error: ${errorData.error || response.statusText}`);
-        return;
-      }
-
-      const data = await response.json();
-      if (Array.isArray(data)) {
-        setResults(data);
-      } else {
-        console.error('Data is not an array:', data);
-        alert('El servidor devolvió un formato de datos inesperado.');
-      }
-    } catch (error) {
-      console.error('Error analyzing files:', error);
-      alert('Error de conexión con el servidor. Por favor, intente de nuevo.');
-    } finally {
-      setLoading(false);
-    }
+    setIframeKey(prev => prev + 1);
   };
 
-  const exportToExcel = () => {
-    const validResults = results.filter(r => r.status === 'success' && r.data);
-    if (validResults.length === 0) {
-      alert('No hay datos válidos para exportar.');
-      return;
-    }
-
-    // Sort by date safely
-    const sortedResults = [...validResults].sort((a, b) => {
-      const dateA = a.data?.fecha ? new Date(a.data.fecha).getTime() : 0;
-      const dateB = b.data?.fecha ? new Date(b.data.fecha).getTime() : 0;
-      return dateA - dateB;
-    });
-
-    const flattenedData = sortedResults.map(r => {
-      const d = r.data!;
-      const i = d.impuestos.desglose;
-      return {
-        'Fecha Emision': d.fecha || 'N/A',
-        'UUID': d.uuid,
-        'Serie': d.serie,
-        'Folio': d.folio,
-        'Tipo Comprobante': d.tipo,
-        'RFC Emisor': d.emisorRfc,
-        'Nombre Emisor': d.emisorNombre,
-        'RFC Receptor': d.receptorRfc,
-        'Nombre Receptor': d.receptorNombre,
-        'Uso CFDI': `${d.usoCFDI} - ${d.usoCFDINombre}`,
-        'Moneda': d.moneda,
-        'Tipo Cambio': d.tipoCambio,
-        'Subtotal (MXN)': d.subtotal,
-        'Descuento (MXN)': d.descuento,
-        'Base IVA 16%': i.base16,
-        'IVA 16%': i.iva16,
-        'Base IVA 8%': i.base8,
-        'IVA 8%': i.iva8,
-        'Base IVA 0%': i.base0,
-        'Base Exento': i.baseExento,
-        'No Objeto de Impuesto': i.baseNoObjeto,
-        'Base IEPS': i.baseIEPS,
-        'IEPS': i.ieps,
-        'Retencion IVA': i.retIVA,
-        'Retencion ISR': i.retISR,
-        'Otros Traslados': i.otrosTrasladados,
-        'Otros Retenidos': i.otrosRetenidos,
-        'Total Trasladados': d.impuestos.totalTrasladados,
-        'Total Retenidos': d.impuestos.totalRetenidos,
-        'Total Factura (MXN)': d.total,
-        'Metodo Pago': d.metodoPago,
-        'Forma Pago': d.formaPago,
-        'Conceptos': d.conceptos.map(c => `${c.cantidad} ${c.unidad} - ${c.descripcion}`).join(' | '),
-      };
-    });
-
-    const worksheet = XLSX.utils.json_to_sheet(flattenedData);
-    
-    // Better auto-size
-    const cols = Object.keys(flattenedData[0] || {}).map(key => {
-      const maxLen = Math.max(
-        key.length,
-        ...flattenedData.map(row => String(row[key as keyof typeof row] || '').length)
-      );
-      return { wch: Math.min(maxLen + 2, 50) };
-    });
-    worksheet['!cols'] = cols;
-
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Reporte Fiscal');
-    XLSX.writeFile(workbook, `Reporte_SAT_${format(new Date(), 'yyyyMMdd_HHmm')}.xlsx`);
+  const handleCopyLink = () => {
+    navigator.clipboard.writeText(appScriptUrl);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
-
-  const filteredResults = [...results]
-    .filter(r => 
-      r.filename.toLowerCase().includes(filter.toLowerCase()) ||
-      (r.data?.emisorNombre.toLowerCase() || '').includes(filter.toLowerCase()) ||
-      (r.data?.receptorNombre.toLowerCase() || '').includes(filter.toLowerCase()) ||
-      (r.data?.uuid || '').includes(filter.toLowerCase())
-    )
-    .sort((a, b) => {
-      if (!a.data || !b.data) return 0;
-      return new Date(a.data.fecha).getTime() - new Date(b.data.fecha).getTime();
-    });
 
   return (
-    <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
+    <div className="min-h-screen bg-slate-50 font-sans text-slate-900 flex flex-col">
       {/* Header */}
       <header className="bg-gold-gradient shadow-xl sticky top-0 z-20">
         <div className="max-w-7xl mx-auto px-4 h-20 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="bg-white/10 backdrop-blur-md p-2.5 rounded-xl border border-white/20">
-              <FileText className="text-wheat w-7 h-7" />
+              <FileSpreadsheet className="text-wheat w-7 h-7" />
             </div>
             <div>
               <h1 className="text-2xl font-black tracking-tighter text-white leading-none">
                 ISBB <span className="text-wheat">SOLUCIONES</span>
               </h1>
-              <p className="text-[10px] text-wheat/70 font-medium uppercase tracking-[0.2em] mt-1">Herramienta Contable Inteligente</p>
+              <p className="text-[10px] text-wheat/70 font-medium uppercase tracking-[0.2em] mt-1">Portal de Inteligencia SAT</p>
             </div>
           </div>
-          <div className="flex items-center gap-6">
-            <button 
-              onClick={() => { setResults([]); setFiles([]); }}
-              className="text-sm font-semibold text-wheat/80 hover:text-wheat transition-colors flex items-center gap-2"
+          <div className="flex items-center gap-4">
+            <a 
+              href={appScriptUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hidden sm:flex items-center gap-2 bg-white/15 hover:bg-white/20 text-wheat hover:text-white transition-all text-xs font-bold uppercase tracking-wider px-4.5 py-2.5 rounded-xl border border-white/10"
             >
-              <Trash2 className="w-4 h-4" />
-              Limpiar Tablero
-            </button>
+              <ExternalLink className="w-4 h-4" />
+              Abrir Web App Externa
+            </a>
           </div>
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-4 py-10">
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-10">
-          
-          {/* Sidebar - Upload Controls */}
-          <div className="lg:col-span-4 space-y-8">
-            <div className="bg-white p-8 rounded-3xl border border-slate-200 shadow-xl shadow-slate-200/50">
-              <h2 className="text-xl font-bold mb-6 flex items-center gap-3 text-slate-800">
-                <div className="bg-wheat/30 p-2 rounded-lg">
-                  <Upload className="w-5 h-5 text-gold-700" />
-                </div>
-                Cargar Archivos
+      {/* Main Content Area */}
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 py-8 md:py-12 flex flex-col gap-8">
+        
+        {/* Banner de Integración del Sistema */}
+        <div className="bg-slate-900 rounded-3xl p-6 md:p-8 text-white relative overflow-hidden shadow-xl border border-slate-800">
+          <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
+            <div className="space-y-2 max-w-2xl">
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] bg-amber-500/10 text-wheat font-black uppercase tracking-wider border border-amber-500/20">
+                <Sparkles className="w-3.5 h-3.5 text-amber-400" /> Nuevo Módulo Activo
+              </span>
+              <h2 className="text-2xl md:text-3xl font-black text-white tracking-tight">
+                Integración de Reportes con <span className="text-wheat">Google Apps Script</span>
               </h2>
-              
-              <div 
-                onClick={() => fileInputRef.current?.click()}
-                className="border-2 border-dashed border-slate-200 rounded-2xl p-10 hover:border-gold-400 hover:bg-gold-50/30 transition-all cursor-pointer flex flex-col items-center justify-center text-center group relative overflow-hidden"
+              <p className="text-slate-300 text-sm leading-relaxed">
+                Hemos actualizado la plataforma migrando del extractor manual local a un potente sistema automatizado en la nube con Google Workspace. Procesamiento de altos volúmenes de XML sin límites y generación directa en Google Sheets.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-3">
+              <a 
+                href={appScriptUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-2 bg-wheat text-slate-900 hover:bg-white px-5 py-3 rounded-2xl font-black text-sm tracking-wide transition-all shadow-md uppercase"
               >
-                <div className="absolute inset-0 bg-gold-50/0 group-hover:bg-gold-50/10 transition-colors" />
-                <div className="bg-slate-100 p-5 rounded-2xl group-hover:scale-110 transition-transform relative z-10">
-                  <Upload className="w-10 h-10 text-slate-400 group-hover:text-gold-600" />
+                <ExternalLink className="w-4 h-4" /> Lanzar Pestaña Directa
+              </a>
+              <button 
+                onClick={handleRefresh}
+                className="flex items-center justify-center p-3 bg-white/10 hover:bg-white/15 text-white rounded-2xl border border-white/10 transition-all"
+                title="Recargar visor"
+              >
+                <RefreshCw className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+          {/* Ambient gradients */}
+          <div className="absolute top-0 right-0 -mr-16 -mt-16 w-64 h-64 bg-wheat/5 rounded-full blur-3xl" />
+          <div className="absolute bottom-0 left-0 -ml-16 -mb-16 w-64 h-64 bg-gold-900/30 rounded-full blur-3xl" />
+        </div>
+
+        {/* Workspace Grid */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+          
+          {/* Sidebar - Información de la Plataforma */}
+          <div className="lg:col-span-4 space-y-6">
+            
+            {/* Tarjeta de Estado & Características */}
+            <div className="bg-white p-6 md:p-8 rounded-3xl border border-slate-200/80 shadow-md">
+              <h3 className="text-lg font-bold text-slate-800 mb-6 flex items-center gap-2">
+                <CloudLightning className="w-5 h-5 text-gold-600" />
+                Detalles del Módulo
+              </h3>
+              
+              <div className="space-y-5">
+                <div className="flex gap-4">
+                  <div className="bg-emerald-50 text-emerald-600 p-2.5 rounded-xl border border-emerald-100 h-10 w-10 shrink-0 flex items-center justify-center">
+                    <ShieldCheck className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-bold text-slate-800">Conexión Segura</h4>
+                    <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                      La aplicación de Google se ejecuta encriptada bajo la infraestructura de Google Cloud con el certificado único de Apps Script.
+                    </p>
+                  </div>
                 </div>
-                <p className="mt-5 text-sm font-bold text-slate-700 relative z-10">Arrastra archivos aquí</p>
-                <p className="text-xs text-slate-400 mt-2 relative z-10">Soporta múltiples archivos <span className="bg-slate-100 px-1.5 py-0.5 rounded">.xml</span> del SAT</p>
-                <input 
-                  type="file" 
-                  ref={fileInputRef} 
-                  onChange={handleFileChange} 
-                  multiple 
-                  accept=".xml" 
-                  className="hidden" 
+
+                <div className="flex gap-4">
+                  <div className="bg-amber-50 text-amber-600 p-2.5 rounded-xl border border-amber-100 h-10 w-10 shrink-0 flex items-center justify-center">
+                    <FileText className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-bold text-slate-800">Reportes Compartidos</h4>
+                    <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                      Guarda, filtra, comparte y descarga los reportes consolidados directamente en formato Excel y Google Sheets con tu equipo de trabajo.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex gap-4">
+                  <div className="bg-blue-50 text-blue-600 p-2.5 rounded-xl border border-blue-100 h-10 w-10 shrink-0 flex items-center justify-center">
+                    <Monitor className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-bold text-slate-800">Interfaz Automatizada</h4>
+                    <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                      Sube tus XML, asocia tus cuentas y deja que los macros automatizados realicen las conciliaciones fiscales por ti.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="border-t border-slate-100 mt-6 pt-6 space-y-3">
+                <button 
+                  onClick={handleCopyLink}
+                  className="w-full flex items-center justify-between p-3.5 bg-slate-50 hover:bg-gold-50/50 hover:border-gold-300 rounded-2xl border border-slate-200 text-xs font-semibold text-slate-600 transition-all group"
+                >
+                  <span className="truncate pr-4 text-slate-500">{appScriptUrl}</span>
+                  {copied ? (
+                    <span className="flex items-center gap-1 text-emerald-600 shrink-0 font-bold">
+                      <Check className="w-4 h-4" /> Copiado
+                    </span>
+                  ) : (
+                    <span className="flex items-center gap-1 text-slate-400 group-hover:text-gold-700 shrink-0">
+                      <Copy className="w-4 h-4" /> Copiar URL
+                    </span>
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {/* Aviso de Autenticación de Google */}
+            <div className="bg-amber-50/70 border border-amber-200 rounded-3xl p-6 md:p-8 space-y-4 shadow-sm">
+              <div className="flex items-start gap-3">
+                <HelpCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <h4 className="text-sm font-bold text-amber-800">¿Pantalla en Blanco o Solicitud de Acceso?</h4>
+                  <p className="text-xs text-amber-700/90 leading-relaxed">
+                    Las medidas de seguridad de Google a veces bloquean el inicio de sesión dentro de marcos (iframes) del sitio. 
+                  </p>
+                </div>
+              </div>
+              <p className="text-xs text-amber-700 leading-relaxed">
+                Si visualizas una pantalla de inicio de sesión de Google que no responde, o un error de acceso:
+              </p>
+              <ol className="list-decimal list-inside text-xs text-amber-800 space-y-2 pl-1 font-medium">
+                <li>Haz clic en el botón de <span className="font-bold">"Lanzar Pestaña Directa"</span> arriba.</li>
+                <li>Inicia sesión con tu cuenta de Google del SAT autorizada de forma externa.</li>
+                <li>¡Regresa a esta página o continúa trabajando interactuando directamente en ella!</li>
+              </ol>
+            </div>
+
+          </div>
+
+          {/* Main Panel - Interactive Embedded Apps Script */}
+          <div className="lg:col-span-8 flex flex-col gap-4">
+            
+            {/* Mock Navegador / Cabecera del Visor */}
+            <div className="bg-white rounded-3xl border border-slate-200 shadow-lg overflow-hidden flex flex-col">
+              
+              {/* Toolbar */}
+              <div className="bg-slate-900 text-white px-5 py-4 flex flex-wrap items-center justify-between gap-4 border-b border-slate-800">
+                <div className="flex items-center gap-3">
+                  {/* Puntos de ventana de SO */}
+                  <div className="flex gap-1.5 shrink-0">
+                    <span className="w-3 h-3 rounded-full bg-red-400 inline-block" />
+                    <span className="w-3 h-3 rounded-full bg-amber-400 inline-block" />
+                    <span className="w-3 h-3 rounded-full bg-emerald-400 inline-block" />
+                  </div>
+                  <span className="text-xs text-slate-400 font-mono tracking-tight hidden sm:inline-block bg-white/5 border border-white/10 px-3 py-1 rounded-lg">
+                    https://script.google.com/macros/s/...
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[9px] bg-emerald-500/15 text-emerald-400 border border-emerald-500/20 font-black uppercase tracking-wider">
+                    Conectado
+                  </span>
+                  <button 
+                    onClick={handleRefresh}
+                    className="flex items-center gap-1.5 text-xs text-slate-300 hover:text-white bg-white/5 hover:bg-white/10 px-3 py-1.5 rounded-xl border border-white/10 transition-colors font-bold"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+                    Actualizar
+                  </button>
+                </div>
+              </div>
+
+              {/* Contenedor del Iframe */}
+              <div className="relative bg-white flex-1" style={{ minHeight: '620px' }}>
+                {loading && (
+                  <div className="absolute inset-0 bg-slate-50/90 z-10 flex flex-col items-center justify-center text-center p-8">
+                    <div className="w-12 h-12 border-4 border-slate-200 border-t-gold-shiny rounded-full animate-spin mb-4" />
+                    <h3 className="text-lg font-bold text-slate-800">Conectando con Google Web App...</h3>
+                    <p className="text-xs text-slate-400 mt-1 max-w-xs">Estableciendo canal seguro con Google Apps Script</p>
+                  </div>
+                )}
+                
+                <iframe 
+                  key={iframeKey}
+                  src={appScriptUrl}
+                  onLoad={() => setLoading(false)}
+                  className="w-full h-[620px] md:h-[720px] lg:h-[780px] border-none block"
+                  allow="geolocation; microphone; camera"
+                  sandbox="allow-same-origin allow-scripts allow-popups allow-forms"
                 />
               </div>
 
-              {files.length > 0 && (
-                <div className="mt-8 space-y-4">
-                  <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-                    <span className="text-sm font-bold text-slate-500 uppercase tracking-wider">{files.length} seleccionados</span>
-                  </div>
-                  <div className="max-h-60 overflow-y-auto space-y-2 pr-2 custom-scrollbar">
-                    {files.map((file, i) => (
-                      <div key={i} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl text-xs group border border-transparent hover:border-gold-200 hover:bg-white transition-all shadow-sm">
-                        <div className="flex items-center gap-2 font-medium text-slate-600">
-                          <FileText className="w-4 h-4 text-gold-500" />
-                          <span className="truncate max-w-[180px]">{file.name}</span>
-                        </div>
-                        <button onClick={() => removeFile(i)} className="text-slate-400 hover:text-red-500 transition-colors">
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                  <button 
-                    onClick={uploadAndAnalyze}
-                    disabled={loading}
-                    className="w-full bg-slate-900 text-gold font-bold py-4 rounded-2xl shadow-xl shadow-slate-200 hover:bg-slate-800 disabled:opacity-50 transition-all flex items-center justify-center gap-3 mt-6 ring-2 ring-gold/20"
-                  >
-                    {loading ? (
-                      <div className="w-6 h-6 border-3 border-wheat/20 border-t-wheat rounded-full animate-spin" />
-                    ) : (
-                      <>PROCESAR XML <ChevronRight className="w-5 h-5" /></>
-                    )}
-                  </button>
-                </div>
-              )}
             </div>
 
-            {results.length > 0 && (
-              <div className="bg-slate-900 rounded-3xl p-8 text-white overflow-hidden relative shadow-2xl">
-                <div className="relative z-10">
-                  <div className="flex items-center gap-2 mb-6">
-                    <PieChart className="w-5 h-5 text-wheat" />
-                    <h3 className="text-wheat text-xs font-black uppercase tracking-[0.2em]">Analítica en Vivo</h3>
-                  </div>
-                  <div className="grid grid-cols-2 gap-6">
-                    <div className="bg-white/5 p-4 rounded-2xl border border-white/10">
-                      <p className="text-3xl font-black text-wheat">{results.filter(r => r.status === 'success').length}</p>
-                      <p className="text-wheat/60 text-[10px] font-bold uppercase tracking-wider mt-1">Procesados</p>
-                    </div>
-                    <div className="bg-white/5 p-4 rounded-2xl border border-white/10">
-                      <p className="text-3xl font-black text-red-400">{results.filter(r => r.status === 'error').length}</p>
-                      <p className="text-wheat/60 text-[10px] font-bold uppercase tracking-wider mt-1">Errores</p>
-                    </div>
-                  </div>
-                  <button 
-                    onClick={exportToExcel}
-                    className="mt-8 w-full bg-wheat text-slate-900 py-4 rounded-2xl font-black flex items-center justify-center gap-3 hover:bg-white transition-all shadow-lg text-sm uppercase tracking-wider"
-                  >
-                    <Download className="w-5 h-5" /> Generar Excel
-                  </button>
-                </div>
-                <div className="absolute top-0 right-0 -mr-12 -mt-12 w-48 h-48 bg-wheat/10 rounded-full blur-3xl" />
-                <div className="absolute bottom-0 left-0 -ml-12 -mb-12 w-48 h-48 bg-gold-900/40 rounded-full blur-3xl font-bold" />
-              </div>
-            )}
           </div>
 
-          {/* Main Content - Results Table */}
-          <div className="lg:col-span-8 space-y-8">
-            {!results.length ? (
-              <div className="h-[650px] bg-white rounded-3xl border border-slate-200 flex flex-col items-center justify-center text-center p-12 shadow-sm border-dashed">
-                <div className="bg-wheat/10 p-8 rounded-full mb-8">
-                  <TableIcon className="w-16 h-16 text-wheat-dark" />
-                </div>
-                <h3 className="text-3xl font-black text-slate-800 mb-3 tracking-tight">Sin Reportes</h3>
-                <p className="text-slate-400 max-w-sm text-sm leading-relaxed font-medium">
-                  ISBB SOLUCIONES procesa tus archivos XML de forma local y segura. Carga tus facturas para comenzar.
-                </p>
-              </div>
-            ) : (
-              <motion.div 
-                initial={{ opacity: 0, y: 30 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="bg-white rounded-3xl border border-slate-200 shadow-xl shadow-slate-200/50 overflow-hidden"
-              >
-                <div className="p-8 border-b border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-6 bg-slate-50/50">
-                  <div>
-                    <h3 className="text-2xl font-black text-slate-800 tracking-tight transition-all">Consolidado Fiscal</h3>
-                    <p className="text-xs text-slate-400 font-bold mt-1 uppercase tracking-widest italic">Registros procesados en tiempo real</p>
-                  </div>
-                  <div className="relative group max-w-md w-full">
-                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 group-focus-within:text-gold-600 transition-colors" />
-                    <input 
-                      type="text" 
-                      placeholder="Buscar por RFC, Nombre, UUID..." 
-                      value={filter}
-                      onChange={(e) => setFilter(e.target.value)}
-                      className="w-full pl-12 pr-5 py-3.5 border border-slate-200 rounded-2xl text-sm font-medium focus:outline-none focus:ring-4 focus:ring-gold-500/10 focus:border-gold-400 transition-all bg-white shadow-inner"
-                    />
-                  </div>
-                </div>
-
-                <div className="overflow-x-auto custom-scrollbar">
-                  <table className="w-full text-left border-collapse min-w-[800px]">
-                    <thead className="bg-slate-900 border-b border-white/10">
-                      <tr>
-                        <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em]">Estado</th>
-                        <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em]">Participantes</th>
-                        <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em]">Temporalidad</th>
-                        <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em] text-right">Subtotal</th>
-                        <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em] text-right">Impuestos</th>
-                        <th className="px-8 py-5 text-[10px] font-black text-wheat uppercase tracking-[0.2em] text-right">Total MXN</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      <AnimatePresence mode='popLayout'>
-                        {filteredResults.map((result, idx) => (
-                          <motion.tr 
-                            layout
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
-                            exit={{ opacity: 0 }}
-                            key={result.data?.uuid || idx} 
-                            className="hover:bg-gold-50/20 transition-colors group cursor-default"
-                          >
-                            <td className="px-8 py-6">
-                              {result.status === 'success' ? (
-                                <div className="bg-emerald-50 w-10 h-10 rounded-full flex items-center justify-center border border-emerald-100 shadow-sm">
-                                  <CheckCircle2 className="w-6 h-6 text-emerald-500" />
-                                </div>
-                              ) : (
-                                <div className="bg-red-50 w-10 h-10 rounded-full flex items-center justify-center border border-red-100 shadow-sm">
-                                  <AlertCircle className="w-6 h-6 text-red-500" />
-                                </div>
-                              )}
-                            </td>
-                            <td className="px-8 py-6">
-                              {result.status === 'success' ? (
-                                <div className="space-y-1.5">
-                                  <div className="text-sm font-black text-slate-800 truncate max-w-[220px]" title={`Emisor: ${result.data?.emisorNombre}`}>
-                                    <span className="text-gold-600 font-black text-[9px] mr-2 bg-gold-50 px-1.5 py-0.5 rounded border border-gold-200">E</span>
-                                    {result.data?.emisorNombre}
-                                  </div>
-                                  <div className="text-xs text-slate-500 font-bold truncate max-w-[220px]" title={`Receptor: ${result.data?.receptorNombre}`}>
-                                    <span className="text-slate-400 font-black text-[9px] mr-2 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">R</span>
-                                    {result.data?.receptorNombre}
-                                  </div>
-                                </div>
-                              ) : (
-                                <span className="text-xs text-red-500 font-black italic">{result.error}</span>
-                              )}
-                            </td>
-                            <td className="px-8 py-6">
-                              {result.status === 'success' && (
-                                <div className="space-y-2">
-                                  <div className="text-xs font-black text-slate-700 tracking-tight">
-                                    {result.data?.fecha ? format(new Date(result.data.fecha), 'dd MMM, yyyy') : 'N/A'}
-                                  </div>
-                                  <div className="inline-flex px-3 py-1 rounded-lg text-[9px] bg-slate-900 text-wheat font-black uppercase tracking-widest shadow-sm">
-                                    {result.data?.tipo}
-                                  </div>
-                                </div>
-                              )}
-                            </td>
-                            <td className="px-8 py-6 text-right whitespace-nowrap">
-                              <span className="text-sm font-black text-slate-600">
-                                {result.status === 'success' && result.data ? `$${result.data.subtotal.toLocaleString('es-MX', { minimumFractionDigits: 2 })}` : '-'}
-                              </span>
-                            </td>
-                            <td className="px-8 py-6 text-right whitespace-nowrap">
-                              <div className="space-y-1 bg-white/50 p-2 rounded-xl border border-slate-100">
-                                {result.status === 'success' && result.data?.impuestos?.desglose?.iva16 !== 0 && (
-                                  <div className="text-[10px] font-black text-emerald-700 uppercase">IVA 16%: <span className="text-slate-900">${result.data?.impuestos?.desglose?.iva16?.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span></div>
-                                )}
-                                {result.status === 'success' && result.data?.impuestos?.desglose?.iva8 !== 0 && (
-                                  <div className="text-[10px] font-black text-emerald-700 uppercase">IVA 8%: <span className="text-slate-900">${result.data?.impuestos?.desglose?.iva8?.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span></div>
-                                )}
-                                {result.status === 'success' && result.data?.impuestos?.desglose?.ieps !== 0 && (
-                                  <div className="text-[10px] font-black text-blue-700 uppercase">IEPS: <span className="text-slate-900">${result.data?.impuestos?.desglose?.ieps?.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span></div>
-                                )}
-                                {result.status === 'success' && result.data?.impuestos?.desglose?.retIVA !== 0 && (
-                                  <div className="text-[10px] font-black text-red-700 uppercase">Ret IVA: <span className="text-slate-900">-${result.data?.impuestos?.desglose?.retIVA?.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span></div>
-                                )}
-                                {result.status === 'success' && result.data?.impuestos?.desglose?.retISR !== 0 && (
-                                  <div className="text-[10px] font-black text-red-700 uppercase">Ret ISR: <span className="text-slate-900">-${result.data?.impuestos?.desglose?.retISR?.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span></div>
-                                )}
-                                {result.status === 'success' && result.data?.impuestos?.desglose?.ivaExento !== 0 && (
-                                  <div className="text-[10px] font-black text-slate-500 uppercase">Exento: <span className="text-slate-900">${result.data?.impuestos?.desglose?.ivaExento?.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span></div>
-                                )}
-                                {result.status === 'success' && result.data?.impuestos?.desglose?.baseNoObjeto !== 0 && (
-                                  <div className="text-[10px] font-black text-slate-500 uppercase">No Objeto: <span className="text-slate-900">${result.data?.impuestos?.desglose?.baseNoObjeto?.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span></div>
-                                )}
-                              </div>
-                            </td>
-                            <td className="px-8 py-6 text-right whitespace-nowrap">
-                              <div className="inline-flex flex-col items-end">
-                                <span className="text-lg font-black text-slate-900 tracking-tighter">
-                                  {result.status === 'success' && result.data ? `$${result.data.total.toLocaleString('es-MX', { minimumFractionDigits: 2 })}` : '-'}
-                                </span>
-                                <span className="text-[8px] font-black text-gold-600 uppercase tracking-widest mt-0.5">Monto Total</span>
-                              </div>
-                            </td>
-                          </motion.tr>
-                        ))}
-                      </AnimatePresence>
-                    </tbody>
-                  </table>
-                </div>
-              </motion.div>
-            )}
-          </div>
         </div>
       </main>
 
-      <footer className="bg-slate-900 py-16 text-center border-t-4 border-wheat">
+      {/* Footer */}
+      <footer className="bg-slate-900 py-16 text-center border-t-4 border-wheat mt-auto">
         <div className="max-w-7xl mx-auto px-4">
           <h2 className="text-3xl font-black text-white tracking-tighter mb-4">
             ISBB <span className="text-wheat">SOLUCIONES</span>
@@ -439,11 +266,10 @@ export default function App() {
           </p>
           <div className="w-12 h-1 bg-wheat mx-auto my-8 rounded-full opacity-30" />
           <p className="text-white/20 text-[10px] font-medium tracking-wider">
-            © {new Date().getFullYear()} ISBB SOLUCIONES - Plataforma de análisis técnico de CFDIs SAT v3.3/4.0
+            © {new Date().getFullYear()} ISBB SOLUCIONES - Plataforma Especializada en Automatización y Reportes SAT
           </p>
         </div>
       </footer>
     </div>
   );
 }
-
