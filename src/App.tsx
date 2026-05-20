@@ -31,7 +31,8 @@ import {
   ChevronDown,
   ChevronUp,
   BadgeAlert,
-  Coins
+  Coins,
+  Scale
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
@@ -71,7 +72,71 @@ const getElementsSafe = (parent: Document | Element, tags: string[]): Element[] 
   return [];
 };
 
-// Interface of extracted CFDI XML properties
+// Lookup dictionaries for Mexican XML CFDI 4.0 Standard Codes
+const USO_CFDI_MAP: Record<string, string> = {
+  'G01': 'Adquisición de mercancías',
+  'G02': 'Devoluciones, descuentos o bonificaciones',
+  'G03': 'Gastos en general',
+  'I01': 'Construcciones',
+  'I02': 'Mobiliario y equipo de oficina por inversiones',
+  'I03': 'Equipo de transporte',
+  'I04': 'Equipo de cómputo y accesorios',
+  'I05': 'Dados, troqueles, moldes, matrices y herramental',
+  'I06': 'Comunicaciones telefónicas',
+  'I07': 'Comunicaciones de satélites',
+  'I08': 'Otra maquinaria y equipo',
+  'D01': 'Honorarios médicos, dentales y gastos hospitalarios',
+  'D02': 'Gastos médicos por incapacidad o discapacidad',
+  'D03': 'Gastos funerales',
+  'D04': 'Donativos',
+  'D05': 'Intereses reales efectivamente pagados por créditos hipotecarios (casa habitación)',
+  'D06': 'Aportaciones voluntarias al SAR',
+  'D07': 'Primas por seguros de gastos médicos',
+  'D08': 'Gastos de transportación escolar obligatoria',
+  'D10': 'Pagos por servicios educativos (colegiaturas)',
+  'S01': 'Sin efectos fiscales',
+  'CP01': 'Pagos',
+  'CN01': 'Nómina',
+};
+
+const FORMA_PAGO_MAP: Record<string, string> = {
+  '01': 'Efectivo',
+  '02': 'Cheque nominativo',
+  '03': 'Transferencia electrónica de fondos',
+  '04': 'Tarjeta de crédito',
+  '05': 'Monedero electrónico',
+  '06': 'Dinero electrónico',
+  '08': 'Vales de despensa',
+  '12': 'Dación en pago',
+  '13': 'Pago por subrogación',
+  '15': 'Pago por consignación',
+  '17': 'Compensación',
+  '23': 'Novación',
+  '24': 'Confusión',
+  '25': 'Remisión de deuda',
+  '26': 'Prescripción o caducidad',
+  '27': 'A los que se refiere la resolución miscelánea fiscal',
+  '28': 'Tarjeta de débito',
+  '29': 'Tarjeta de servicios',
+  '30': 'Aplicación de anticipos',
+  '31': 'Intermediario pagos',
+  '99': 'Por definir',
+};
+
+const getUsoCfdiName = (code: string): string => {
+  if (!code) return 'Sin especificar';
+  const clean = code.trim().toUpperCase();
+  return USO_CFDI_MAP[clean] || 'Uso personalizado o no listado';
+};
+
+const getFormaPagoName = (code: string): string => {
+  if (!code) return 'Sin especificar';
+  const clean = code.trim().toUpperCase();
+  const normalized = clean.length === 1 ? '0' + clean : clean;
+  return FORMA_PAGO_MAP[normalized] || 'Forma de pago no listada';
+};
+
+// Interface of extracted CFDI XML properties with detailed tax breakdown
 interface ParsedCFDI {
   fileName: string;
   folio: string;
@@ -90,6 +155,17 @@ interface ParsedCFDI {
   ivaRetenido: number;
   isrRetenido: number;
   conceptos: string[];
+
+  // Custom detailed fields for tax auditor requirements
+  usoCfdi: string;
+  usoCfdiDesc: string;
+  formaPago: string;
+  formaPagoDesc: string;
+  impuestoExento: number;
+  noObjetoImpuesto: number;
+  tasa0Base: number;
+  tasa16Base: number;
+  iepsTotal: number;
 }
 
 // Interface for conversational chat messages
@@ -173,10 +249,11 @@ export default function App() {
     const folio = getAttrSafe(comprobante, ['Folio', 'folio']);
     const serie = getAttrSafe(comprobante, ['Serie', 'serie']);
     const fecha = getAttrSafe(comprobante, ['Fecha', 'fecha']);
-    const tipo = getAttrSafe(comprobante, ['TipoDeComprobante', 'tipoDeComprobante']) || 'I';
+    const tipo = (getAttrSafe(comprobante, ['TipoDeComprobante', 'tipoDeComprobante']) || 'I').toUpperCase();
     const subTotal = parseFloat(getAttrSafe(comprobante, ['SubTotal', 'subTotal']) || '0');
     const descuento = parseFloat(getAttrSafe(comprobante, ['Descuento', 'descuento']) || '0');
     const total = parseFloat(getAttrSafe(comprobante, ['Total', 'total']) || '0');
+    const formaPago = getAttrSafe(comprobante, ['FormaPago', 'formaPago']) || '';
     
     const emisor = getElementSafe(xmlDoc, ['cfdi:Emisor', 'Emisor']);
     const emisorRfc = getAttrSafe(emisor, ['Rfc', 'rfc']);
@@ -185,6 +262,7 @@ export default function App() {
     const receptor = getElementSafe(xmlDoc, ['cfdi:Receptor', 'Receptor']);
     const receptorRfc = getAttrSafe(receptor, ['Rfc', 'rfc']);
     const receptorNombre = getAttrSafe(receptor, ['Nombre', 'nombre']);
+    const usoCfdi = getAttrSafe(receptor, ['UsoCFDI', 'usoCFDI']) || '';
     
     // Extract Conceptos
     const conceptoElements = getElementsSafe(xmlDoc, ['cfdi:Concepto', 'Concepto']);
@@ -194,43 +272,139 @@ export default function App() {
       return `${desc} ($${parseFloat(imp || '0').toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MXN)`;
     });
     
-    // Impuestos calculation
+    // Tax Desgloses requested by user
+    let noObjetoImpuesto = 0;
+    let impuestoExento = 0;
+    let tasa0Base = 0;
+    let tasa16Base = 0;
+    let iepsTotal = 0;
     let ivaTrasladado = 0;
     let ivaAcreditable = 0;
     let ivaRetenido = 0;
     let isrRetenido = 0;
-    
-    // Exact search in Traslados
-    const traslados = getElementsSafe(xmlDoc, ['cfdi:Traslado', 'Traslado']);
-    traslados.forEach(t => {
-      const impuesto = getAttrSafe(t, ['Impuesto', 'impuesto']);
-      const importe = parseFloat(getAttrSafe(t, ['Importe', 'importe']) || '0');
-      if (impuesto === '002' || impuesto === 'IVA') { // IVA
-        if (tipo === 'I') {
-          ivaTrasladado += importe;
-        } else if (tipo === 'E') {
-          ivaAcreditable += importe;
+
+    // Classify concept elements nested taxes
+    conceptoElements.forEach(concepto => {
+      const objetoImp = getAttrSafe(concepto, ['ObjetoImp', 'objetoImp']);
+      const cpImporte = parseFloat(getAttrSafe(concepto, ['Importe', 'importe']) || '0');
+      
+      if (objetoImp === '01') {
+        noObjetoImpuesto += cpImporte;
+      }
+      
+      const conceptTraslados = getElementsSafe(concepto, ['cfdi:Traslado', 'Traslado']);
+      conceptTraslados.forEach(t => {
+        const impuesto = getAttrSafe(t, ['Impuesto', 'impuesto']);
+        const tipoFactor = getAttrSafe(t, ['TipoFactor', 'tipoFactor']);
+        const tasaOCuotaStr = getAttrSafe(t, ['TasaOCuota', 'tasaOCuota']);
+        const tasaOCuota = parseFloat(tasaOCuotaStr || '0');
+        const base = parseFloat(getAttrSafe(t, ['Base', 'base']) || '0');
+        const importe = parseFloat(getAttrSafe(t, ['Importe', 'importe']) || '0');
+        
+        if (impuesto === '002' || impuesto === 'IVA') {
+          if (tipoFactor === 'Exento') {
+            impuestoExento += base;
+          } else if (tipoFactor === 'Tasa') {
+            if (tasaOCuota === 0) {
+              tasa0Base += base;
+            } else if (Math.abs(tasaOCuota - 0.16) < 0.01) {
+              tasa16Base += base;
+              if (tipo === 'I') {
+                ivaTrasladado += importe;
+              } else if (tipo === 'E') {
+                ivaAcreditable += importe;
+              }
+            }
+          }
+        } else if (impuesto === '003' || impuesto === 'IEPS') {
+          iepsTotal += importe;
         }
-      }
+      });
+
+      const conceptRetenciones = getElementsSafe(concepto, ['cfdi:Retencion', 'Retencion']);
+      conceptRetenciones.forEach(r => {
+        const impuesto = getAttrSafe(r, ['Impuesto', 'impuesto']);
+        const importe = parseFloat(getAttrSafe(r, ['Importe', 'importe']) || '0');
+        if (impuesto === '001' || impuesto === 'ISR') {
+          isrRetenido += importe;
+        } else if (impuesto === '002' || impuesto === 'IVA') {
+          ivaRetenido += importe;
+        } else if (impuesto === '003' || impuesto === 'IEPS') {
+          iepsTotal += importe;
+        }
+      });
     });
-    
-    const retencionesGroup = getElementsSafe(xmlDoc, ['cfdi:Retencion', 'Retencion']);
-    retencionesGroup.forEach(r => {
-      const impuesto = getAttrSafe(r, ['Impuesto', 'impuesto']);
-      const importe = parseFloat(getAttrSafe(r, ['Importe', 'importe']) || '0');
-      if (impuesto === '001' || impuesto === 'ISR') {
-        isrRetenido += importe;
-      } else if (impuesto === '002' || impuesto === 'IVA') {
-        ivaRetenido += importe;
+
+    // Fallback if concept taxes are empty (common in simplified invoices)
+    if (tasa16Base === 0 && tasa0Base === 0 && impuestoExento === 0) {
+      const traslados = getElementsSafe(xmlDoc, ['cfdi:Traslado', 'Traslado']);
+      traslados.forEach(t => {
+        const impuesto = getAttrSafe(t, ['Impuesto', 'impuesto']);
+        const tipoFactor = getAttrSafe(t, ['TipoFactor', 'tipoFactor']);
+        const tasaOCuotaStr = getAttrSafe(t, ['TasaOCuota', 'tasaOCuota']);
+        const tasaOCuota = parseFloat(tasaOCuotaStr || '0');
+        const base = parseFloat(getAttrSafe(t, ['Base', 'base']) || '0');
+        const importe = parseFloat(getAttrSafe(t, ['Importe', 'importe']) || '0');
+
+        if (impuesto === '002' || impuesto === 'IVA') {
+          if (tipoFactor === 'Exento') {
+            impuestoExento += base || subTotal;
+          } else if (tipoFactor === 'Tasa') {
+            if (tasaOCuota === 0) {
+              tasa0Base += base || subTotal;
+            } else if (Math.abs(tasaOCuota - 0.16) < 0.01) {
+              tasa16Base += base || (importe / 0.16);
+              if (tipo === 'I') {
+                ivaTrasladado += importe;
+              } else if (tipo === 'E') {
+                ivaAcreditable += importe;
+              }
+            }
+          }
+        } else if (impuesto === '003' || impuesto === 'IEPS') {
+          iepsTotal += importe;
+        }
+      });
+
+      const retenciones = getElementsSafe(xmlDoc, ['cfdi:Retencion', 'Retencion']);
+      retenciones.forEach(r => {
+        const impuesto = getAttrSafe(r, ['Impuesto', 'impuesto']);
+        const importe = parseFloat(getAttrSafe(r, ['Importe', 'importe']) || '0');
+        if (impuesto === '001' || impuesto === 'ISR') {
+          isrRetenido += importe;
+        } else if (impuesto === '002' || impuesto === 'IVA') {
+          ivaRetenido += importe;
+        } else if (impuesto === '003' || impuesto === 'IEPS') {
+          iepsTotal += importe;
+        }
+      });
+    }
+
+    // Direct fallback for total 16% IVA if not calculated through traslados loop
+    if (tipo === 'I' && ivaTrasladado === 0) {
+      const parentImpuestos = getElementSafe(xmlDoc, ['cfdi:Impuestos', 'Impuestos']);
+      const totalIvaStr = getAttrSafe(parentImpuestos, ['TotalImpuestosTrasladados', 'totalImpuestosTrasladados']);
+      const totalIva = parseFloat(totalIvaStr || '0');
+      if (totalIva > 0) {
+        ivaTrasladado = totalIva;
+        if (tasa16Base === 0) tasa16Base = totalIva / 0.16;
       }
-    });
+    } else if (tipo === 'E' && ivaAcreditable === 0) {
+      const parentImpuestos = getElementSafe(xmlDoc, ['cfdi:Impuestos', 'Impuestos']);
+      const totalIvaStr = getAttrSafe(parentImpuestos, ['TotalImpuestosTrasladados', 'totalImpuestosTrasladados']);
+      const totalIva = parseFloat(totalIvaStr || '0');
+      if (totalIva > 0) {
+        ivaAcreditable = totalIva;
+        if (tasa16Base === 0) tasa16Base = totalIva / 0.16;
+      }
+    }
 
     return {
       fileName,
       folio: folio || 'S/F',
       serie: serie || '',
       fecha: fecha ? fecha.substring(0, 10) : 'S/F',
-      tipo: tipo.toUpperCase(),
+      tipo,
       subTotal,
       descuento,
       total,
@@ -242,7 +416,18 @@ export default function App() {
       ivaAcreditable,
       ivaRetenido,
       isrRetenido,
-      conceptos: conceptos.slice(0, 3)
+      conceptos: conceptos.slice(0, 3),
+
+      // Custom detailed parameters mapped perfectly
+      usoCfdi,
+      usoCfdiDesc: getUsoCfdiName(usoCfdi),
+      formaPago,
+      formaPagoDesc: getFormaPagoName(formaPago),
+      impuestoExento,
+      noObjetoImpuesto,
+      tasa0Base,
+      tasa16Base,
+      iepsTotal
     };
   };
 
@@ -298,9 +483,25 @@ export default function App() {
     });
   };
 
-  // Remove a single parsed file
+  // Sort files chronologically by date
+  const sortedUploadedFiles = React.useMemo(() => {
+    return [...uploadedFiles].sort((a, b) => {
+      const dateA = a.fecha || '0000-00-00';
+      const dateB = b.fecha || '0000-00-00';
+      return dateA.localeCompare(dateB);
+    });
+  }, [uploadedFiles]);
+
+  // Remove a single parsed file safely by sorted index
   const handleRemoveFile = (indexToRemove: number) => {
-    setUploadedFiles(prev => prev.filter((_, idx) => idx !== indexToRemove));
+    setUploadedFiles(prev => {
+      const sorted = [...prev].sort((a, b) => (a.fecha || '').localeCompare(b.fecha || ''));
+      const fileToRemove = sorted[indexToRemove];
+      if (fileToRemove) {
+        return prev.filter(f => f.fileName !== fileToRemove.fileName);
+      }
+      return prev.filter((_, idx) => idx !== indexToRemove);
+    });
     if (uploadedFiles.length <= 1) {
       setAuditResult('');
     }
@@ -327,7 +528,14 @@ export default function App() {
     let subTotalAcumulado = 0;
     let totalAcumulado = 0;
 
-    uploadedFiles.forEach(f => {
+    // Detailed tax sums requested by user
+    let impuestoExentoTotal = 0;
+    let noObjetoImpuestoTotal = 0;
+    let tasa0BaseTotal = 0;
+    let tasa16BaseTotal = 0;
+    let iepsTotalSum = 0;
+
+    sortedUploadedFiles.forEach(f => {
       if (f.tipo === 'I') {
         ingresosTotal += f.subTotal;
         ingresosCount++;
@@ -344,12 +552,19 @@ export default function App() {
       isrRetenidoTotal += f.isrRetenido;
       subTotalAcumulado += f.subTotal;
       totalAcumulado += f.total;
+
+      // Add detailed taxes
+      impuestoExentoTotal += f.impuestoExento;
+      noObjetoImpuestoTotal += f.noObjetoImpuesto;
+      tasa0BaseTotal += f.tasa0Base;
+      tasa16BaseTotal += f.tasa16Base;
+      iepsTotalSum += f.iepsTotal;
     });
 
     const balanceIva = ivaTrasladadoTotal - ivaAcreditableTotal - ivaRetenidoTotal;
 
     return {
-      totalFiles: uploadedFiles.length,
+      totalFiles: sortedUploadedFiles.length,
       ingresosCount,
       egresosCount,
       pagosCount,
@@ -361,19 +576,26 @@ export default function App() {
       isrRetenidoTotal,
       subTotalAcumulado,
       totalAcumulado,
-      balanceIva
-    };
-  }, [uploadedFiles]);
+      balanceIva,
 
-  // Export fully built catalog to standard Excel workbook
+      // New properties
+      impuestoExentoTotal,
+      noObjetoImpuestoTotal,
+      tasa0BaseTotal,
+      tasa16BaseTotal,
+      iepsTotalSum
+    };
+  }, [sortedUploadedFiles]);
+
+  // Export fully built catalog to standard Excel workbook (Sorted chronologically)
   const handleExportToExcel = () => {
-    if (uploadedFiles.length === 0) return;
+    if (sortedUploadedFiles.length === 0) return;
     
-    const excelRows = uploadedFiles.map(f => ({
+    const excelRows = sortedUploadedFiles.map(f => ({
+      'Fecha Emisión': f.fecha,
       'Archivo': f.fileName,
       'Serie': f.serie,
       'Folio': f.folio,
-      'Fecha Emision': f.fecha,
       'Tipo CFDI': f.tipo === 'I' ? 'I - Ingreso (Cobros)' : f.tipo === 'E' ? 'E - Egreso (Gastos)' : 'P - Pago',
       'RFC Emisor': f.emisorRfc,
       'Razón Social Emisor': f.emisorNombre,
@@ -381,10 +603,18 @@ export default function App() {
       'Razón Social Receptor': f.receptorNombre,
       'Subtotal ($)': f.subTotal,
       'Descuento ($)': f.descuento,
-      'IVA Trasladado ($)': f.ivaTrasladado,
-      'IVA Acreditable ($)': f.ivaAcreditable,
-      'IVA Retenido ($)': f.ivaRetenido,
-      'ISR Retenido ($)': f.isrRetenido,
+      'Impuesto Exento ($)': f.impuestoExento,
+      'No Objeto a Impuesto ($)': f.noObjetoImpuesto,
+      'Tasa 0% ($)': f.tasa0Base,
+      'Tasa 16% ($)': f.tasa16Base,
+      'IVA ($)': f.tipo === 'I' ? f.ivaTrasladado : f.ivaAcreditable,
+      'IEPS ($)': f.iepsTotal,
+      'Retención de IVA ($)': f.ivaRetenido,
+      'Retención de ISR ($)': f.isrRetenido,
+      'Uso CFDI (Clave)': f.usoCfdi || 'S/E',
+      'Uso CFDI (Nombre)': f.usoCfdiDesc || 'Sin especificar',
+      'Forma de Pago (Clave)': f.formaPago || 'S/E',
+      'Forma de Pago (Nombre)': f.formaPagoDesc || 'Sin especificar',
       'Total Facturado ($)': f.total,
       'Conceptos Principales': f.conceptos.join(' | ')
     }));
@@ -735,7 +965,7 @@ Genera las fórmulas fiscales con su desglose:
               Análisis y Conciliación Fiscal de <span className="text-wheat">Archivos XML</span>
             </h2>
             <p className="text-slate-300 text-sm leading-relaxed">
-              Cargue de forma local, inmediata y segura sus archivos XML emitidos y recibidos del SAT. Obtenga visualización interactiva de sumas netas, exporte registros conciliados a Excel, y consulte dictámenes fiscales completos con Inteligencia Artificial.
+              Cargue de forma local, inmediata y segura sus archivos XML emitidos y recibidos del SAT. Obtenga visualización interactiva de sumas netas, exporte registros conciliados a Excel con desgloses tributarios completos por tasa y folio de manera cronológica.
             </p>
           </div>
           
@@ -745,7 +975,7 @@ Genera las fórmulas fiscales con su desglose:
             </div>
             <div>
               <p className="text-xs text-slate-400 font-bold uppercase tracking-wider">Módulos Activos</p>
-              <p className="text-xs text-wheat font-medium">Asistente CPA Fiscal Activo</p>
+              <p className="text-xs text-wheat font-medium">Consola de Control Fiscal Activa</p>
             </div>
           </div>
         </div>
@@ -766,8 +996,8 @@ Genera las fórmulas fiscales con su desglose:
                 : 'border-transparent text-slate-500 hover:text-slate-800 hover:border-slate-300'
             }`}
           >
-            <Sparkles className="w-4 h-4 text-gold-600" />
-            Analizador XML e Impuestos con IA
+            <Scale className="w-4 h-4 text-gold-650" />
+            Analizador XML y Desglose Tributario
           </button>
 
           <button 
@@ -907,11 +1137,11 @@ Genera las fórmulas fiscales con su desglose:
                       <p className="text-[10px] text-slate-400 mt-1">O pulse para examinar de forma manual</p>
                     </div>
 
-                    {uploadedFiles.length > 0 && (
+                    {sortedUploadedFiles.length > 0 && (
                       <div className="mt-4 flex items-center justify-between">
                         <span className="text-[11px] font-bold text-slate-650 bg-slate-100 px-3 py-1 rounded-full flex items-center gap-1.5 border border-slate-200">
                           <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 animate-pulse" />
-                          {uploadedFiles.length} Facturas Cargadas Correctamente
+                          {sortedUploadedFiles.length} Facturas Cargadas
                         </span>
                         <button 
                           onClick={handleClearAllFiles}
@@ -923,48 +1153,24 @@ Genera las fórmulas fiscales con su desglose:
                     )}
                   </div>
 
-                  {/* Trigger Tax Auditor AI */}
+                  {/* Operational Guide Card replacing AI Trigger */}
                   <div className="bg-slate-900 border border-slate-800 text-white p-6 rounded-3xl shadow-md space-y-4">
                     <div className="flex items-center gap-2">
-                      <Sparkles className="text-wheat w-5 h-5" />
-                      <h3 className="text-sm font-black uppercase tracking-wider text-white">Auditoría Fiscal e Impuestos con IA</h3>
+                      <Shield className="text-wheat w-5 h-5" />
+                      <h3 className="text-xs font-black uppercase tracking-wider text-white">Dictamen y Conciliación Estándar</h3>
                     </div>
                     <p className="text-[11px] text-slate-300 leading-relaxed">
-                      La Inteligencia Artificial cruzará el listado de comprobantes XML cargados, estimará el ISR según su régimen, verificará la balanza de IVA y generará un informe tributario profesional.
+                      Este sistema procesa la estructura original de los archivos XML CFDI versión 4.0 emitida por el SAT mexicano.
                     </p>
-
-                    <div>
-                      <label className="block text-[10px] font-bold text-wheat uppercase tracking-widest mb-1.5">Régimen Fiscal de Auditoría</label>
-                      <select 
-                        value={xmlRegimen}
-                        onChange={(e) => setXmlRegimen(e.target.value)}
-                        className="w-full bg-slate-800/80 outline-none border border-slate-700 p-3 rounded-xl text-xs font-bold text-white transition-colors"
-                      >
-                        <option value="RESICO_PF">RESICO (Simplificado de Confianza - Pers. Física)</option>
-                        <option value="AE_P_F">Actividad Empresarial y Profesional</option>
-                        <option value="P_MORAL_GEN">Persona Moral (Régimen General)</option>
-                        <option value="RIF">Régimen de Incorporación Fiscal (RIF)</option>
-                        <option value="SUELDOS">Sueldos y Salarios / Asimilados</option>
-                      </select>
+                    <div className="p-3 bg-slate-800/80 rounded-xl border border-slate-700/50 space-y-2 text-[10px] font-mono text-slate-300">
+                      <p className="flex items-center gap-1.5"><span className="text-emerald-400">✓</span> Reconocimiento de Catálogos SAT 2026</p>
+                      <p className="flex items-center gap-1.5"><span className="text-emerald-400">✓</span> Mapeo automático de Uso de CFDI</p>
+                      <p className="flex items-center gap-1.5"><span className="text-emerald-400">✓</span> Mapeo automático de Forma de Pago</p>
+                      <p className="flex items-center gap-1.5"><span className="text-emerald-400">✓</span> Clasificación de base exenta y no objeto</p>
                     </div>
-
-                    <button
-                      onClick={handleAnalyzeXmlAI}
-                      disabled={uploadedFiles.length === 0 || auditing}
-                      className="w-full bg-gradient-to-r from-amber-500 to-gold-700 hover:from-amber-600 hover:to-gold-800 text-slate-950 font-black text-xs uppercase tracking-wider py-3.5 px-4 rounded-xl transition-all shadow-lg active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                    >
-                      {auditing ? (
-                        <>
-                          <RefreshCw className="w-4 h-4 animate-spin text-slate-950" />
-                          Generando Auditoría...
-                        </>
-                      ) : (
-                        <>
-                          <Sparkles className="w-4 h-4 text-slate-950 animate-pulse" />
-                          Ejecutar Auditoría Fiscal IA
-                        </>
-                      )}
-                    </button>
+                    <p className="text-[10px] text-slate-400 italic">
+                      Toda la información se calcula automáticamente de manera estrictamente local para resguardar el secreto fiscal de sus clientes.
+                    </p>
                   </div>
 
                 </div>
@@ -972,81 +1178,108 @@ Genera las fórmulas fiscales con su desglose:
                 {/* Right Results / Reports view panel */}
                 <div className="lg:col-span-7 space-y-6">
                   
-                  {/* AI Report display card */}
-                  <div className="bg-white rounded-3xl border border-slate-200 shadow-md p-6 min-h-[400px] flex flex-col justify-between">
+                  {/* Detailed Tax Breakdown Audit Console */}
+                  <div className="bg-white rounded-3xl border border-slate-200 shadow-md p-6 min-h-[430px] flex flex-col justify-between">
                     <div>
                       <div className="flex items-center justify-between border-b pb-4 mb-4">
                         <div className="flex items-center gap-2">
-                          <Bot className="w-5 h-5 text-gold-600" />
-                          <h3 className="text-md font-black text-slate-900 tracking-tight">Dictamen de Auditoría SAT & Impuestos</h3>
+                          <Scale className="w-5 h-5 text-gold-600" />
+                          <h3 className="text-md font-black text-slate-900 tracking-tight">Consola de Desglose de Impuestos</h3>
                         </div>
-                        {auditResult && (
-                          <span className="text-[10px] bg-emerald-50 text-emerald-700 font-extrabold px-3 py-1 rounded-full border border-emerald-100 flex items-center gap-1">
-                            <Check className="w-3.5 h-3.5" /> Analizado
-                          </span>
+                        {sortedUploadedFiles.length > 0 && (
+                          <button
+                            onClick={handleExportToExcel}
+                            className="text-[10px] bg-emerald-50 text-emerald-700 font-extrabold px-3 py-1.5 rounded-xl border border-emerald-100 flex items-center gap-1 hover:bg-emerald-100 transition-colors"
+                          >
+                            <FileSpreadsheet className="w-3.5 h-3.5" /> Descargar Excel
+                          </button>
                         )}
                       </div>
 
                       {/* Pending files state */}
-                      {uploadedFiles.length === 0 && !auditing && (
-                        <div className="py-20 text-center space-y-3">
+                      {sortedUploadedFiles.length === 0 && (
+                        <div className="py-24 text-center space-y-3">
                           <FileCodeSection />
-                          <h4 className="text-sm font-bold text-slate-700">Sin Archivos XML Detectados</h4>
+                          <h4 className="text-sm font-bold text-slate-700">Sin Facturas XML Cargadas</h4>
                           <p className="text-xs text-slate-400 max-w-sm mx-auto leading-relaxed">
-                            Cargue sus CFDIs emitidos o recibidos en el panel izquierdo para habilitar la visualización y auditoría fiscal.
+                            Cargue sus CFDIs emitidos o recibidos en el panel de suministro para ver el desglose fiscal e impuestos consolidados.
                           </p>
                         </div>
                       )}
 
-                      {/* Loaded but wait for triggering state */}
-                      {uploadedFiles.length > 0 && !auditResult && !auditing && (
-                        <div className="py-16 text-center space-y-4">
-                          <div className="bg-amber-50 text-amber-600 p-4 rounded-full border border-amber-100 w-16 h-16 flex items-center justify-center mx-auto">
-                            <Sparkles className="w-8 h-8 animate-pulse" />
+                      {/* Formatted Tax breakdown and financial reconciliation sheets */}
+                      {sortedUploadedFiles.length > 0 && (
+                        <div className="space-y-4">
+                          <div className="bg-slate-50 rounded-2xl border border-slate-150 p-4 space-y-3.5">
+                            <h4 className="text-xs font-black text-slate-800 uppercase tracking-widest border-b pb-2">Resumen General de Base Gravable</h4>
+                            
+                            <div className="grid grid-cols-2 gap-4 text-xs">
+                              <div className="bg-white p-3 rounded-xl border border-slate-100 flex flex-col justify-between">
+                                <span className="text-slate-400 text-[10px] font-bold uppercase">Subtotal Neto</span>
+                                <span className="text-sm font-black text-slate-800">${xmlTotals.subTotalAcumulado.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                              </div>
+                              <div className="bg-white p-3 rounded-xl border border-slate-100 flex flex-col justify-between">
+                                <span className="text-slate-400 text-[10px] font-bold uppercase">Total Facturado</span>
+                                <span className="text-sm font-black text-slate-900">${xmlTotals.totalAcumulado.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                              </div>
+                            </div>
                           </div>
-                          <h4 className="text-sm font-bold text-slate-700">Todo Listo para Diagnosticar</h4>
-                          <p className="text-xs text-slate-400 max-w-sm mx-auto leading-relaxed">
-                            Hemos extraído los acumulados de las facturas correctamente. Pulse el botón <strong className="text-slate-700">"Ejecutar Auditoría Fiscal IA"</strong> para recibir el análisis fiscal senior.
-                          </p>
-                        </div>
-                      )}
 
-                      {/* Generating spinner */}
-                      {auditing && (
-                        <div className="py-24 text-center space-y-4 flex flex-col items-center justify-center">
-                          <div className="relative">
-                            <div className="w-14 h-14 border-4 border-slate-100 border-t-gold-shiny rounded-full animate-spin" />
-                            <Sparkles className="w-5 h-5 text-amber-500 absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 animate-ping" />
+                          <div className="bg-slate-50 rounded-2xl border border-slate-150 p-4 space-y-3">
+                            <h4 className="text-xs font-black text-slate-800 uppercase tracking-widest border-b pb-2">Desglose de Tasas y Exenciones</h4>
+                            
+                            <div className="space-y-2 text-xs">
+                              <div className="flex justify-between items-center bg-white p-2.5 rounded-lg border border-slate-100">
+                                <span className="text-slate-500 font-semibold">Impuesto Exento base</span>
+                                <span className="font-extrabold text-slate-705">${xmlTotals.impuestoExentoTotal.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                              </div>
+
+                              <div className="flex justify-between items-center bg-white p-2.5 rounded-lg border border-slate-100">
+                                <span className="text-slate-500 font-semibold">No Objeto a Impuestos base</span>
+                                <span className="font-extrabold text-slate-705">${xmlTotals.noObjetoImpuestoTotal.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                              </div>
+
+                              <div className="flex justify-between items-center bg-white p-2.5 rounded-lg border border-slate-100">
+                                <span className="text-slate-500 font-semibold">Tasa 0% base</span>
+                                <span className="font-extrabold text-slate-705">${xmlTotals.tasa0BaseTotal.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                              </div>
+
+                              <div className="flex justify-between items-center bg-white p-2.5 rounded-lg border border-slate-100">
+                                <span className="text-slate-500 font-semibold">Tasa 16% base</span>
+                                <span className="font-extrabold text-slate-705">${xmlTotals.tasa16BaseTotal.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                              </div>
+                            </div>
                           </div>
-                          <h4 className="text-sm font-extrabold text-slate-800">ISBB IA está dictaminando...</h4>
-                          <p className="text-xs text-slate-500 italic max-w-md animate-pulse">
-                            "{loadingMessages[loadingStep]}"
-                          </p>
-                        </div>
-                      )}
 
-                      {/* Formatted Audit Results */}
-                      {auditResult && !auditing && (
-                        <div className="prose max-w-none text-slate-700 mt-2 space-y-3 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar bg-slate-50/20 p-4 rounded-2xl border border-slate-100">
-                          {renderMarkdownTextHTML(auditResult)}
+                          <div className="bg-slate-900 text-white rounded-2xl p-4 space-y-3">
+                            <h4 className="text-xs font-black text-gold-400 uppercase tracking-widest border-b border-slate-800 pb-2">Impuestos de Traslado, IEPS y Retenciones</h4>
+                            
+                            <div className="grid grid-cols-2 gap-3 text-[11px] font-mono">
+                              <div className="flex justify-between border-b border-slate-800 pb-1.5">
+                                <span className="text-slate-400">IVA Trasladado:</span>
+                                <span className="font-black text-emerald-400">${xmlTotals.ivaTrasladadoTotal.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                              </div>
+                              <div className="flex justify-between border-b border-slate-800 pb-1.5">
+                                <span className="text-slate-400">IVA Acreditable:</span>
+                                <span className="font-black text-amber-400">${xmlTotals.ivaAcreditableTotal.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                              </div>
+                              <div className="flex justify-between border-b border-slate-800 pb-1.5">
+                                <span className="text-slate-400">Retención IVA:</span>
+                                <span className="font-black text-red-400">${xmlTotals.ivaRetenidoTotal.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                              </div>
+                              <div className="flex justify-between border-b border-slate-800 pb-1.5">
+                                <span className="text-slate-400">Retención ISR:</span>
+                                <span className="font-black text-red-400">${xmlTotals.isrRetenidoTotal.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                              </div>
+                            </div>
+                            <div className="flex justify-between items-center pt-1 border-t border-slate-800 text-xs">
+                              <span className="text-gold-300 font-bold">Impuesto IEPS Total:</span>
+                              <span className="font-black text-gold-400">${xmlTotals.iepsTotalSum.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                            </div>
+                          </div>
                         </div>
                       )}
                     </div>
-
-                    {auditResult && (
-                      <div className="border-t pt-4 mt-6 flex justify-end gap-2">
-                        <button 
-                          onClick={() => {
-                            navigator.clipboard.writeText(auditResult);
-                            alert('Dictamen copiado al portapapeles correctamente.');
-                          }}
-                          className="flex items-center gap-1 py-2 px-3 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-lg transition-colors border border-slate-200"
-                        >
-                          <Copy className="w-3.5 h-3.5" /> Copiar Dictamen
-                        </button>
-                      </div>
-                    )}
-
                   </div>
 
                 </div>
@@ -1190,13 +1423,13 @@ Genera las fórmulas fiscales con su desglose:
                       </div>
                       <button 
                         onClick={() => setSelectedFile(null)}
-                        className="bg-white/15 hover:bg-white/20 px-3 py-1 text-xs rounded-lg text-slate-350 hover:text-white border border-white/5 transition-colors font-bold"
+                        className="bg-white/15 hover:bg-white/20 px-3 py-1 text-xs rounded-lg text-slate-300 hover:text-white border border-white/10 transition-colors font-bold"
                       >
                         Cerrar
                       </button>
                     </div>
 
-                    <div className="p-6 space-y-4 text-xs max-h-[450px] overflow-y-auto">
+                    <div className="p-6 space-y-4 text-xs max-h-[500px] overflow-y-auto">
                       <div className="grid grid-cols-2 gap-4">
                         <div>
                           <p className="text-[10px] text-slate-400 font-bold uppercase">RFC Emisor</p>
@@ -1210,18 +1443,62 @@ Genera las fórmulas fiscales con su desglose:
                         </div>
                       </div>
 
-                      <div className="grid grid-cols-3 gap-2 bg-slate-50 p-3 rounded-xl border border-slate-100 font-mono">
+                      <div className="grid grid-cols-2 gap-4 bg-slate-50 p-3.5 rounded-xl border border-slate-100">
                         <div>
-                          <p className="text-[9px] text-slate-400 font-bold">Subtotal</p>
-                          <p className="font-black text-slate-700">${selectedFile.subTotal.toFixed(2)}</p>
+                          <p className="text-[10px] text-slate-400 font-bold uppercase">Uso de CFDI</p>
+                          <p className="font-bold text-slate-700">{selectedFile.usoCfdi || 'S/E'}</p>
+                          <p className="text-[10px] text-slate-500 truncate" title={selectedFile.usoCfdiDesc}>{selectedFile.usoCfdiDesc || 'Sin especificar'}</p>
                         </div>
                         <div>
-                          <p className="text-[9px] text-slate-400 font-bold">Imp. Traslados</p>
-                          <p className="font-black text-slate-700">${(selectedFile.tipo === 'I' ? selectedFile.ivaTrasladado : selectedFile.ivaAcreditable).toFixed(2)}</p>
+                          <p className="text-[10px] text-slate-400 font-bold uppercase">Forma de Pago</p>
+                          <p className="font-bold text-slate-700">{selectedFile.formaPago || 'S/E'}</p>
+                          <p className="text-[10px] text-slate-500 truncate" title={selectedFile.formaPagoDesc}>{selectedFile.formaPagoDesc || 'Sin especificar'}</p>
                         </div>
-                        <div>
-                          <p className="text-[9px] text-slate-400 font-bold">Total</p>
-                          <p className="font-black text-slate-900 text-sm">${selectedFile.total.toFixed(2)}</p>
+                      </div>
+
+                      <div className="bg-slate-900 text-white p-4 rounded-xl font-mono text-[10px] space-y-2 font-semibold">
+                        <p className="text-gold-400 font-black border-b border-slate-800 pb-1 uppercase tracking-wider">Desglose de Impuestos SAT</p>
+                        <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
+                          <div className="flex justify-between">
+                            <span className="text-slate-450">Subtotal:</span>
+                            <span className="font-bold text-slate-205">${selectedFile.subTotal.toFixed(2)}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-slate-450">Impuesto Exento:</span>
+                            <span className="font-bold text-slate-205">${selectedFile.impuestoExento.toFixed(2)}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-slate-450 font-semibold text-slate-450">No Objeto:</span>
+                            <span className="font-bold text-slate-205">${selectedFile.noObjetoImpuesto.toFixed(2)}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-slate-450">Base Tasa 0%:</span>
+                            <span className="font-bold text-slate-205">${selectedFile.tasa0Base.toFixed(2)}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-slate-450">Base Tasa 16%:</span>
+                            <span className="font-bold text-emerald-305">${selectedFile.tasa16Base.toFixed(2)}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-slate-450">IVA Tras/Acred:</span>
+                            <span className="font-bold text-emerald-305">${(selectedFile.tipo === 'I' ? selectedFile.ivaTrasladado : selectedFile.ivaAcreditable).toFixed(2)}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-slate-450">IEPS total:</span>
+                            <span className="font-bold text-amber-305">${selectedFile.iepsTotal.toFixed(2)}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-slate-450">Retención IVA:</span>
+                            <span className="font-bold text-red-305">${selectedFile.ivaRetenido.toFixed(2)}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-slate-450">Retención ISR:</span>
+                            <span className="font-bold text-red-305">${selectedFile.isrRetenido.toFixed(2)}</span>
+                          </div>
+                          <div className="flex justify-between border-t border-slate-800 pt-1.5 col-span-2 text-gold-300 font-extrabold text-xs">
+                            <span>TOTAL NETO:</span>
+                            <span>${selectedFile.total.toFixed(2)} MXN</span>
+                          </div>
                         </div>
                       </div>
 
