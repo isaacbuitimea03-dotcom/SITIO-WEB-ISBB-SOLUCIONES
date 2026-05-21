@@ -32,7 +32,8 @@ import {
   ChevronUp,
   BadgeAlert,
   Coins,
-  Scale
+  Scale,
+  Award
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
@@ -168,24 +169,20 @@ interface ParsedCFDI {
   iepsTotal: number;
 }
 
-// Interface for conversational chat messages
-interface ChatMessage {
+// Interface for filter preset
+interface FilterPreset {
   id: string;
-  role: 'user' | 'model';
-  content: string;
-  timestamp: Date;
+  name: string;
+  startDate: string;
+  endDate: string;
+  cfdiType: string;
+  rfcEmisor: string;
+  rfcReceptor: string;
+  conceptText: string;
 }
 
 export default function App() {
-  const cpaCloudUrl = 'https://script.google.com/macros/s/AKfycbyQ6utU_Qd7RwtVkLe7wh_7y1ws47t0Qplyyb2lazMRdYS9WR-njmM7CjjkhI2NRMKx/exec';
-  const [iframeKey, setIframeKey] = useState(0);
-  const [copied, setCopied] = useState(false);
-  const [loadingIframe, setLoadingIframe] = useState(true);
-  
-  // Navigation: xml-audit (Analizador XML), sheets-console (GAS Iframe), ai-chat (CPA chat & Simulator)
-  const [activeTab, setActiveTab] = useState<'xml-audit' | 'sheets-console' | 'ai-chat'>('xml-audit');
-
-  // --- TAB 1: XML AUDITOR & TAX ANALYZER STATE ---
+  // --- XML AUDITOR & TAX ANALYZER STATE ---
   const [isDragging, setIsDragging] = useState(false);
   const [uploadedFiles, setUploadedFiles] = useState<ParsedCFDI[]>([]);
   const [xmlRegimen, setXmlRegimen] = useState<string>('RESICO_PF');
@@ -214,30 +211,58 @@ export default function App() {
     'Consultando criterios y leyes vigentes de ISR del SAT mexicano...'
   ];
 
-  // --- TAB 3: CHAT AND ESTIMATOR SECTIONS STATE ---
-  const [ingresos, setIngresos] = useState<string>('55000');
-  const [deducciones, setDeducciones] = useState<string>('18000');
-  const [retenciones, setRetenciones] = useState<string>('1200');
-  const [regimen, setRegimen] = useState<string>('RESICO_PF');
-  const [calculating, setCalculating] = useState<boolean>(false);
-  const [calcResult, setCalcResult] = useState<string>('');
+  // --- STATE FOR SEARCH AND FILTER FEATURES ---
+  const [isAdvancedFiltersOpen, setIsAdvancedFiltersOpen] = useState(false);
+  const [filterStartDate, setFilterStartDate] = useState('');
+  const [filterEndDate, setFilterEndDate] = useState('');
+  const [filterCfdiType, setFilterCfdiType] = useState('ALL'); // 'ALL' | 'I' | 'E' | 'P'
+  const [filterRfcEmisor, setFilterRfcEmisor] = useState('');
+  const [filterRfcReceptor, setFilterRfcReceptor] = useState('');
+  const [filterConcept, setFilterConcept] = useState('');
+  const [presetName, setPresetName] = useState('');
 
-  const [chatInput, setChatInput] = useState<string>('');
-  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
-
-  // Initialize welcome message once
-  React.useEffect(() => {
-    setChatHistory([
-      {
-        id: 'welcome',
-        role: 'model',
-        content: '¡Hola! Soy tu **Asesor Fiscal y Contable de ISBB SOLUCIONES**. Como especialista en la legislación del SAT mexicano, puedo ayudarte a analizar tus ingresos, deducir correctamente bajo tu régimen fiscal, simular pagos de ISR/IVA o resolver dudas sobre CFDI 4.0. \n\n¿En qué puedo asistirte técnicamente hoy?',
-        timestamp: new Date()
+  // Local storage saved filters state
+  const [savedFilters, setSavedFilters] = useState<FilterPreset[]>(() => {
+    try {
+      const saved = localStorage.getItem('isbb_saved_filters_v2');
+      if (saved) {
+        return JSON.parse(saved);
       }
-    ]);
-  }, []);
+    } catch (e) {
+      console.warn(e);
+    }
+    return [
+      {
+        id: 'preset-ingresos',
+        name: 'Solo Ingresos (Ventas)',
+        startDate: '',
+        endDate: '',
+        cfdiType: 'I',
+        rfcEmisor: '',
+        rfcReceptor: '',
+        conceptText: '',
+      },
+      {
+        id: 'preset-gastos',
+        name: 'Solo Egresos (Gastos Ded.)',
+        startDate: '',
+        endDate: '',
+        cfdiType: 'E',
+        rfcEmisor: '',
+        rfcReceptor: '',
+        conceptText: '',
+      }
+    ];
+  });
 
-  const [sendingChat, setSendingChat] = useState<boolean>(false);
+  // Save filters whenever they change
+  React.useEffect(() => {
+    try {
+      localStorage.setItem('isbb_saved_filters_v2', JSON.stringify(savedFilters));
+    } catch (e) {
+      console.warn(e);
+    }
+  }, [savedFilters]);
 
   // --- XML PARSER ENGINE IN REACT ---
   const parseXMLData = (xmlText: string, fileName: string): ParsedCFDI => {
@@ -492,16 +517,9 @@ export default function App() {
     });
   }, [uploadedFiles]);
 
-  // Remove a single parsed file safely by sorted index
-  const handleRemoveFile = (indexToRemove: number) => {
-    setUploadedFiles(prev => {
-      const sorted = [...prev].sort((a, b) => (a.fecha || '').localeCompare(b.fecha || ''));
-      const fileToRemove = sorted[indexToRemove];
-      if (fileToRemove) {
-        return prev.filter(f => f.fileName !== fileToRemove.fileName);
-      }
-      return prev.filter((_, idx) => idx !== indexToRemove);
-    });
+  // Remove a single parsed file safely by filename
+  const handleRemoveFileByFilename = (fileNameToRemove: string) => {
+    setUploadedFiles(prev => prev.filter(f => f.fileName !== fileNameToRemove));
     if (uploadedFiles.length <= 1) {
       setAuditResult('');
     }
@@ -513,7 +531,69 @@ export default function App() {
     setAuditResult('');
   };
 
-  // High performance computations on parsed XMLs
+  // Search filtering logic for the XML table with Advanced Filter controls
+  const filteredFilesList = React.useMemo(() => {
+    return sortedUploadedFiles.filter(item => {
+      // 1. Simple search query-matching
+      if (xmlSearchQuery) {
+        const q = xmlSearchQuery.toLowerCase();
+        const matchesSimple = (
+          item.fileName.toLowerCase().includes(q) ||
+          item.emisorNombre.toLowerCase().includes(q) ||
+          item.emisorRfc.toLowerCase().includes(q) ||
+          item.receptorNombre.toLowerCase().includes(q) ||
+          item.receptorRfc.toLowerCase().includes(q) ||
+          item.folio.toLowerCase().includes(q) ||
+          item.conceptos.some(c => c.toLowerCase().includes(q))
+        );
+        if (!matchesSimple) return false;
+      }
+
+      // 2. CFDI Type filter
+      if (filterCfdiType !== 'ALL') {
+        if (item.tipo !== filterCfdiType) return false;
+      }
+
+      // 3. Date range filters
+      if (filterStartDate) {
+        if (item.fecha < filterStartDate) return false;
+      }
+      if (filterEndDate) {
+        if (item.fecha > filterEndDate) return false;
+      }
+
+      // 4. RFC Emisor filter
+      if (filterRfcEmisor.trim()) {
+        const emisorQ = filterRfcEmisor.trim().toLowerCase();
+        const matchesEmisor = (
+          item.emisorRfc.toLowerCase().includes(emisorQ) ||
+          item.emisorNombre.toLowerCase().includes(emisorQ)
+        );
+        if (!matchesEmisor) return false;
+      }
+
+      // 5. RFC Receptor filter
+      if (filterRfcReceptor.trim()) {
+        const receptorQ = filterRfcReceptor.trim().toLowerCase();
+        const matchesReceptor = (
+          item.receptorRfc.toLowerCase().includes(receptorQ) ||
+          item.receptorNombre.toLowerCase().includes(receptorQ)
+        );
+        if (!matchesReceptor) return false;
+      }
+
+      // 6. Specific Concepts filter
+      if (filterConcept.trim()) {
+        const conceptQ = filterConcept.trim().toLowerCase();
+        const matchesConcept = item.conceptos.some(c => c.toLowerCase().includes(conceptQ));
+        if (!matchesConcept) return false;
+      }
+
+      return true;
+    });
+  }, [sortedUploadedFiles, xmlSearchQuery, filterStartDate, filterEndDate, filterCfdiType, filterRfcEmisor, filterRfcReceptor, filterConcept]);
+
+  // High performance computations on parsed XMLs, dynamically recalculating based on active advanced filters list
   const xmlTotals = React.useMemo(() => {
     let ingresosTotal = 0;
     let egresosTotal = 0;
@@ -528,14 +608,13 @@ export default function App() {
     let subTotalAcumulado = 0;
     let totalAcumulado = 0;
 
-    // Detailed tax sums requested by user
     let impuestoExentoTotal = 0;
     let noObjetoImpuestoTotal = 0;
     let tasa0BaseTotal = 0;
     let tasa16BaseTotal = 0;
     let iepsTotalSum = 0;
 
-    sortedUploadedFiles.forEach(f => {
+    filteredFilesList.forEach(f => {
       if (f.tipo === 'I') {
         ingresosTotal += f.subTotal;
         ingresosCount++;
@@ -553,7 +632,6 @@ export default function App() {
       subTotalAcumulado += f.subTotal;
       totalAcumulado += f.total;
 
-      // Add detailed taxes
       impuestoExentoTotal += f.impuestoExento;
       noObjetoImpuestoTotal += f.noObjetoImpuesto;
       tasa0BaseTotal += f.tasa0Base;
@@ -564,7 +642,7 @@ export default function App() {
     const balanceIva = ivaTrasladadoTotal - ivaAcreditableTotal - ivaRetenidoTotal;
 
     return {
-      totalFiles: sortedUploadedFiles.length,
+      totalFiles: filteredFilesList.length,
       ingresosCount,
       egresosCount,
       pagosCount,
@@ -577,21 +655,19 @@ export default function App() {
       subTotalAcumulado,
       totalAcumulado,
       balanceIva,
-
-      // New properties
       impuestoExentoTotal,
       noObjetoImpuestoTotal,
       tasa0BaseTotal,
       tasa16BaseTotal,
       iepsTotalSum
     };
-  }, [sortedUploadedFiles]);
+  }, [filteredFilesList]);
 
-  // Export fully built catalog to standard Excel workbook (Sorted chronologically)
+  // Export filtered catalog to standard Excel workbook (Chronological, strictly respecting active filter results)
   const handleExportToExcel = () => {
-    if (sortedUploadedFiles.length === 0) return;
+    if (filteredFilesList.length === 0) return;
     
-    const excelRows = sortedUploadedFiles.map(f => ({
+    const excelRows = filteredFilesList.map(f => ({
       'Fecha Emisión': f.fecha,
       'Archivo': f.fileName,
       'Serie': f.serie,
@@ -626,6 +702,50 @@ export default function App() {
     XLSX.writeFile(workbook, `Conciliacion_XML_ISBB_${new Date().toISOString().substring(0, 10)}.xlsx`);
   };
 
+  // --- ADVANCED FILTER ACTIONS ---
+  const applyPresetFilter = (preset: FilterPreset) => {
+    setFilterStartDate(preset.startDate);
+    setFilterEndDate(preset.endDate);
+    setFilterCfdiType(preset.cfdiType);
+    setFilterRfcEmisor(preset.rfcEmisor);
+    setFilterRfcReceptor(preset.rfcReceptor);
+    setFilterConcept(preset.conceptText);
+  };
+
+  const handleSaveCurrentFilter = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!presetName.trim()) return;
+    
+    const newPreset: FilterPreset = {
+      id: `filter-preset-${Date.now()}`,
+      name: presetName.trim(),
+      startDate: filterStartDate,
+      endDate: filterEndDate,
+      cfdiType: filterCfdiType,
+      rfcEmisor: filterRfcEmisor,
+      rfcReceptor: filterRfcReceptor,
+      conceptText: filterConcept
+    };
+
+    setSavedFilters(prev => [...prev, newPreset]);
+    setPresetName('');
+  };
+
+  const handleRemovePreset = (idToRemove: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setSavedFilters(prev => prev.filter(p => p.id !== idToRemove));
+  };
+
+  const handleResetFilters = () => {
+    setFilterStartDate('');
+    setFilterEndDate('');
+    setFilterCfdiType('ALL');
+    setFilterRfcEmisor('');
+    setFilterRfcReceptor('');
+    setFilterConcept('');
+    setXmlSearchQuery('');
+  };
+
   // Send XML context to modern server-side endpoint for expert tax audit
   const handleAnalyzeXmlAI = async () => {
     if (uploadedFiles.length === 0 || auditing) return;
@@ -634,7 +754,7 @@ export default function App() {
     setAuditResult('');
     
     // Thin down files array to strictly match active models context windows securely
-    const structuredDetails = uploadedFiles.map(f => ({
+    const structuredDetails = filteredFilesList.map(f => ({
       factura: f.folio !== 'S/F' ? `${f.serie || ''}${f.folio}` : f.fileName,
       tipo: f.tipo === 'I' ? 'Ingreso (Cliente)' : f.tipo === 'E' ? 'Egreso/Gasto' : 'Pago/Otro',
       emisor: f.emisorNombre,
@@ -677,251 +797,12 @@ export default function App() {
 
       const data = await response.json();
       setAuditResult(data.result);
-      
-      // Also write results directly to the active CPA chat history for seamless consolidation
-      const newHistory: ChatMessage[] = [
-        ...chatHistory,
-        {
-          id: `audit-usr-${Date.now()}`,
-          role: 'user',
-          content: `Efectúa una auditoría automatizada sobre un lote de ${uploadedFiles.length} archivos XML bajo mi régimen fiscal.`,
-          timestamp: new Date()
-        },
-        {
-          id: `audit-res-${Date.now()}`,
-          role: 'model',
-          content: `### 📋 Dictamen de Auditoría XML Generada:\n\n${data.result}`,
-          timestamp: new Date()
-        }
-      ];
-      setChatHistory(newHistory);
-      
     } catch (error: any) {
       console.error('AI XML audit error:', error);
       setAuditResult(`⚠️ Error: ${error.message || 'La auditoría con Inteligencia Artificial no pudo procesarse.'}`);
     } finally {
       setAuditing(false);
     }
-  };
-
-  // Search filtering logic for the XML table
-  const filteredFilesList = uploadedFiles.filter(item => {
-    const q = xmlSearchQuery.toLowerCase();
-    return (
-      item.fileName.toLowerCase().includes(q) ||
-      item.emisorNombre.toLowerCase().includes(q) ||
-      item.emisorRfc.toLowerCase().includes(q) ||
-      item.receptorNombre.toLowerCase().includes(q) ||
-      item.receptorRfc.toLowerCase().includes(q) ||
-      item.folio.toLowerCase().includes(q)
-    );
-  });
-
-  // --- REFRESH / COPY SECURE APPS SCRIPT IFRAME ---
-  const handleRefreshIframe = () => {
-    setLoadingIframe(true);
-    setIframeKey(prev => prev + 1);
-  };
-
-  const handleCopyLink = () => {
-    navigator.clipboard.writeText(cpaCloudUrl);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  // --- MANUAL TAX CALCULATOR SIMULATION SUBMIT ---
-  const handleCalculateTaxesManual = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setCalculating(true);
-    setCalcResult('');
-
-    const regimenLabelMap: Record<string, string> = {
-      'RESICO_PF': 'Régimen Simplificado de Confianza (RESICO) - Persona Física',
-      'AE_P_F': 'Personas Físicas con Actividad Empresarial y Profesional',
-      'P_MORAL_GEN': 'Persona Moral - Régimen General Ley',
-      'RIF': 'Régimen de Incorporación Fiscal (RIF)',
-      'SUELDOS': 'Sueldos y Salarios / Asimilados'
-    };
-
-    const promptText = `Por favor, realiza un cálculo contable integral y reporte ejecutivo estimado para el periodo mensual con los siguientes datos monetarios:
-- Ingresos Brutos Totales Declarados: $${ingresos} MXN
-- Gastos y Deducciones Autorizadas Facturadas: $${deducciones} MXN
-- Retenciones Efectuadas de Impuestos (por personas morales u otros): $${retenciones} MXN
-- Régimen Fiscal del Contribuyente: ${regimenLabelMap[regimen] || regimen}
-
-Genera las fórmulas fiscales con su desglose:
-1. Base gravable y porcentaje de tasa aplicable mensual.
-2. ISR aproximado a cargo y el ISR neto a pagar restando las retenciones correspondientes.
-3. Desglose de IVA (IVA Trasladado al 16%, IVA Acreditable al 16% y resultado neto de IVA pagar o a favor).
-4. Un diagnóstico rápido con 3 consejos de estrategia fiscal personalizados para el régimen seleccionado con el objetivo de optimizar el pago en futuros meses bajo la normatividad de la Ley de ISR mexicana actual.`;
-
-    try {
-      const response = await fetch('/api/analyze-tax-ai', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ prompt: promptText }),
-      });
-
-      if (!response.ok) {
-        throw new Error('No se pudo establecer conexión con el motor de cálculo de IA.');
-      }
-
-      const data = await response.json();
-      setCalcResult(data.result);
-      
-      const newHistory: ChatMessage[] = [
-        ...chatHistory,
-        {
-          id: `calc-usr-${Date.now()}`,
-          role: 'user',
-          content: `Cálculo rápido ejecutado bajo el régimen "${regimenLabelMap[regimen]}" con Ingresos de $${ingresos} MXN y Deducciones de $${deducciones} MXN.`,
-          timestamp: new Date()
-        },
-        {
-          id: `calc-res-${Date.now()}`,
-          role: 'model',
-          content: `### 📊 Reporte de Cálculo Estimado Generado:\n\n${data.result}`,
-          timestamp: new Date()
-        }
-      ];
-      setChatHistory(newHistory);
-    } catch (error: any) {
-      console.error('Calculation AI error:', error);
-      setCalcResult(`⚠️ Error: ${error.message || 'No se pudo generar el análisis. Verifique su conexión y vuelva a intentarlo.'}`);
-    } finally {
-      setCalculating(false);
-    }
-  };
-
-  // --- CONVERSATIONAL CHAT API TRIGGERS ---
-  const handleSendChatText = async (presetPrompt?: string) => {
-    const textToSend = presetPrompt || chatInput;
-    if (!textToSend.trim() || sendingChat) return;
-
-    if (!presetPrompt) {
-      setChatInput('');
-    }
-
-    const userMessage: ChatMessage = {
-      id: `chat-usr-${Date.now()}`,
-      role: 'user',
-      content: textToSend,
-      timestamp: new Date()
-    };
-
-    const temporaryHistory = [...chatHistory, userMessage];
-    setChatHistory(temporaryHistory);
-    setSendingChat(true);
-
-    try {
-      const apiHistory = temporaryHistory.map(msg => ({
-        role: msg.role,
-        content: msg.content
-      }));
-
-      const response = await fetch('/api/analyze-tax-ai', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ 
-          prompt: textToSend,
-          chatHistory: apiHistory.slice(-6) // Preserve last 6 messages
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error('Fallo en la conexión del servicio contable de IA.');
-      }
-
-      const data = await response.json();
-      
-      setChatHistory(prev => [
-        ...prev,
-        {
-          id: `chat-res-${Date.now()}`,
-          role: 'model',
-          content: data.result,
-          timestamp: new Date()
-        }
-      ]);
-    } catch (error: any) {
-      console.error('Chat error:', error);
-      setChatHistory(prev => [
-        ...prev,
-        {
-          id: `chat-err-${Date.now()}`,
-          role: 'model',
-          content: `⚠️ Lo lamento, en este momento el módulo de Asesoría IA de ISBB SOLUCIONES experimenta latencia. Error: ${error.message || 'Error técnico de red.'}`,
-          timestamp: new Date()
-        }
-      ]);
-    } finally {
-      setSendingChat(false);
-    }
-  };
-
-  // Raw Markdown interpreter that maps lists, headers and bolding into premium CSS markup
-  const renderMarkdownTextHTML = (text: string) => {
-    const lines = text.split('\n');
-    return lines.map((line, index) => {
-      if (line.startsWith('### ')) {
-        return <h4 key={index} className="text-sm font-black text-slate-900 mt-5 mb-2 first:mt-0 flex items-center gap-1.5">{line.substring(4)}</h4>;
-      }
-      if (line.startsWith('## ')) {
-        return <h3 key={index} className="text-md font-black text-slate-950 mt-6 mb-3 flex items-center gap-1.5 border-b pb-1.5 border-slate-100">{line.substring(3)}</h3>;
-      }
-      if (line.startsWith('# ')) {
-        return <h2 key={index} className="text-lg font-black text-gold-700 mt-7 mb-4 flex items-center gap-2">{line.substring(2)}</h2>;
-      }
-      
-      if (line.trim().startsWith('|') && line.includes('-|-')) {
-        return null;
-      }
-      if (line.trim().startsWith('|')) {
-        const columns = line.split('|').map(c => c.trim()).filter(c => c !== '');
-        return (
-          <div key={index} className="grid grid-cols-2 gap-2 bg-slate-50 hover:bg-slate-100 p-2.5 rounded-lg border border-slate-200/50 my-1 text-xs">
-            {columns.map((col, colIdx) => (
-              <span key={colIdx} className={colIdx === 0 ? "font-bold text-slate-700" : "text-slate-600 font-medium"}>
-                {col}
-              </span>
-            ))}
-          </div>
-        );
-      }
-
-      if (line.trim().startsWith('- ') || line.trim().startsWith('* ')) {
-        const cleanLine = line.trim().substring(2);
-        return (
-          <li key={index} className="ml-5 list-disc text-slate-650 pl-1 py-1.5 text-xs leading-relaxed">
-            {parseBoldMarkers(cleanLine)}
-          </li>
-        );
-      }
-
-      if (line.trim() === '') {
-        return <div key={index} className="h-3" />;
-      }
-
-      return (
-        <p key={index} className="text-xs text-slate-600 leading-relaxed my-2">
-          {parseBoldMarkers(line)}
-        </p>
-      );
-    });
-  };
-
-  const parseBoldMarkers = (text: string) => {
-    const parts = text.split('**');
-    return parts.map((part, index) => {
-      if (index % 2 === 1) {
-        return <strong key={index} className="font-black text-slate-800 bg-amber-50 px-1 py-0.5 rounded border border-amber-200/20">{part}</strong>;
-      }
-      return part;
-    });
   };
 
   return (
@@ -954,8 +835,8 @@ Genera las fórmulas fiscales con su desglose:
         <div className="max-w-7xl mx-auto px-4 relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-8">
           <div className="space-y-3 max-w-3xl">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] bg-amber-500/10 text-wheat font-black uppercase tracking-wider border border-amber-500/20">
-                <Sparkles className="w-3.5 h-3.5 text-amber-400 animate-pulse" /> Soportado por IA Gemini
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] bg-slate-800 text-gold-300 font-black uppercase tracking-wider border border-slate-700">
+                <Award className="w-3.5 h-3.5 text-gold-400" /> Conciliador de XML Premium / ISBB
               </span>
               <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] bg-blue-500/10 text-blue-300 font-black uppercase tracking-wider border border-blue-500/20">
                 <Shield className="w-3.5 h-3.5 text-blue-400" /> Facturación CFDI 4.0
@@ -984,65 +865,9 @@ Genera las fórmulas fiscales con su desglose:
         <div className="absolute bottom-0 left-0 -ml-24 -mb-24 w-80 h-80 bg-gold-900/20 rounded-full blur-3xl pointer-events-none" />
       </div>
 
-      {/* Flexible Tabs Navigation - Resolves client's clarification perfectly */}
-      <div className="bg-white border-b border-slate-200">
-        <div className="max-w-7xl mx-auto px-4 flex flex-wrap gap-1 sm:gap-4">
-          <button 
-            onClick={() => setActiveTab('xml-audit')}
-            id="nav-tab-xml-audit"
-            className={`py-5 px-4 font-bold text-xs sm:text-sm tracking-wide relative transition-all border-b-2 flex items-center gap-2 ${
-              activeTab === 'xml-audit' 
-                ? 'border-gold-600 text-gold-700 bg-gold-50/10' 
-                : 'border-transparent text-slate-500 hover:text-slate-800 hover:border-slate-300'
-            }`}
-          >
-            <Scale className="w-4 h-4 text-gold-650" />
-            Analizador XML y Desglose Tributario
-          </button>
-
-          <button 
-            onClick={() => setActiveTab('sheets-console')}
-            id="nav-tab-sheets-console"
-            className={`py-5 px-4 font-bold text-xs sm:text-sm tracking-wide relative transition-all border-b-2 flex items-center gap-2 ${
-              activeTab === 'sheets-console' 
-                ? 'border-gold-600 text-gold-700 bg-gold-50/10' 
-                : 'border-transparent text-slate-500 hover:text-slate-800 hover:border-slate-300'
-            }`}
-          >
-            <FileSpreadsheet className="w-4 h-4 text-slate-500" />
-            Consola en la Nube (Google Sheets)
-          </button>
-          
-          <button 
-            onClick={() => setActiveTab('ai-chat')}
-            id="nav-tab-ai-chat"
-            className={`py-5 px-4 font-bold text-xs sm:text-sm tracking-wide relative transition-all border-b-2 flex items-center gap-2 ${
-              activeTab === 'ai-chat' 
-                ? 'border-gold-600 text-gold-700 bg-gold-50/10' 
-                : 'border-transparent text-slate-500 hover:text-slate-800 hover:border-slate-300'
-            }`}
-          >
-            <Calculator className="w-4 h-4 text-emerald-600" />
-            Simulador CPA y Chat de Asesoría
-          </button>
-        </div>
-      </div>
-
       {/* Main Container Layout */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 py-8 flex flex-col gap-8">
-        <AnimatePresence mode="wait">
-          
-          {/* TAB 1: XML INTERACTIVE ANALYZER (AI-POWERED) */}
-          {activeTab === 'xml-audit' && (
-            <motion.div
-              key="xml-audit-tab"
-              initial={{ opacity: 0, y: 15 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -15 }}
-              transition={{ duration: 0.2 }}
-              className="space-y-8"
-              id="xml-analyzer-container"
-            >
+        <div className="space-y-8" id="xml-analyzer-container">
               {/* Quick Summary Cards on Parsed XML Data */}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                 <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-sm flex items-center gap-4">
@@ -1308,6 +1133,23 @@ Genera las fórmulas fiscales con su desglose:
                         <Search className="w-4 h-4 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
                       </div>
 
+                      {/* Toggle Advanced Filters Button */}
+                      <button 
+                        onClick={() => setIsAdvancedFiltersOpen(!isAdvancedFiltersOpen)}
+                        className={`py-2 px-3 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 border shadow-sm ${
+                          isAdvancedFiltersOpen 
+                            ? 'bg-slate-900 text-white border-slate-900 hover:bg-slate-850' 
+                            : 'bg-white text-slate-705 border-slate-200 hover:bg-slate-50'
+                        }`}
+                        title="Activar panel de búsqueda y filtros detallados"
+                      >
+                        <Search className="w-4 h-4" />
+                        Filtros Avanzados
+                        {(filterStartDate || filterEndDate || filterCfdiType !== 'ALL' || filterRfcEmisor || filterRfcReceptor || filterConcept) && (
+                          <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                        )}
+                      </button>
+
                       <button 
                         onClick={handleExportToExcel}
                         className="py-2 px-3 bg-emerald-600 hover:bg-emerald-600 border border-emerald-550 text-white hover:border-emerald-700 text-xs font-bold uppercase tracking-wide rounded-xl flex items-center justify-center gap-1.5 transition-all w-full sm:w-auto shadow-sm"
@@ -1318,6 +1160,153 @@ Genera las fórmulas fiscales con su desglose:
                       </button>
                     </div>
                   </div>
+
+                  <AnimatePresence initial={false}>
+                    {isAdvancedFiltersOpen && (
+                      <motion.div 
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: 'auto', opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        transition={{ duration: 0.2 }}
+                        className="bg-slate-50/75 rounded-2xl border border-slate-200 p-5 space-y-4 overflow-hidden"
+                      >
+                        <div className="flex items-center justify-between border-b border-slate-200 pb-2.5">
+                          <span className="text-[11px] font-black text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
+                            Panel de Filtrado Avanzado
+                          </span>
+                          <button 
+                            onClick={handleResetFilters}
+                            className="text-[10px] font-bold text-red-600 hover:text-red-700 uppercase flex items-center gap-1 transition-colors"
+                          >
+                            Restablecer Filtros
+                          </button>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+                          {/* Column 1: Dates & CFDI Type */}
+                          <div className="space-y-3">
+                            <div>
+                              <span className="block text-[10px] font-black text-slate-500 uppercase tracking-wider mb-1.5">Rango de Fechas (Desde / Hasta)</span>
+                              <div className="grid grid-cols-2 gap-2">
+                                <input 
+                                  type="date"
+                                  value={filterStartDate}
+                                  onChange={(e) => setFilterStartDate(e.target.value)}
+                                  className="bg-white border border-slate-200 rounded-xl px-2.5 py-1.5 text-xs text-slate-700 font-bold focus:border-gold-500 outline-none transition-colors"
+                                />
+                                <input 
+                                  type="date"
+                                  value={filterEndDate}
+                                  onChange={(e) => setFilterEndDate(e.target.value)}
+                                  className="bg-white border border-slate-200 rounded-xl px-2.5 py-1.5 text-xs text-slate-700 font-bold focus:border-gold-500 outline-none transition-colors"
+                                />
+                              </div>
+                            </div>
+
+                            <div>
+                              <span className="block text-[10px] font-black text-slate-500 uppercase tracking-wider mb-1.5">Tipo de CFDI</span>
+                              <select 
+                                value={filterCfdiType}
+                                onChange={(e) => setFilterCfdiType(e.target.value)}
+                                className="w-full bg-white border border-slate-200 rounded-xl px-3 py-1.5 text-xs text-slate-700 font-bold focus:border-gold-500 outline-none transition-colors"
+                              >
+                                <option value="ALL">Todos los tipos</option>
+                                <option value="I">I - Ingresos (Ventas/Cobros)</option>
+                                <option value="E">E - Egresos (Gastos)</option>
+                                <option value="P">P - Complementos de Pago</option>
+                              </select>
+                            </div>
+                          </div>
+
+                          {/* Column 2: RFC Emisor, Receptor & Specific concepts */}
+                          <div className="space-y-3">
+                            <div className="grid grid-cols-2 gap-2">
+                              <div>
+                                <span className="block text-[10px] font-black text-slate-500 uppercase tracking-wider mb-1.5">RFC/Nombre Emisor</span>
+                                <input 
+                                  type="text"
+                                  placeholder="RFC o Nombre..."
+                                  value={filterRfcEmisor}
+                                  onChange={(e) => setFilterRfcEmisor(e.target.value)}
+                                  className="w-full bg-white border border-slate-200 rounded-xl px-3 py-1.5 text-xs text-slate-700 font-semibold focus:border-gold-500 outline-none transition-colors"
+                                />
+                              </div>
+                              <div>
+                                <span className="block text-[10px] font-black text-slate-500 uppercase tracking-wider mb-1.5">RFC/Nombre Receptor</span>
+                                <input 
+                                  type="text"
+                                  placeholder="RFC o Nombre..."
+                                  value={filterRfcReceptor}
+                                  onChange={(e) => setFilterRfcReceptor(e.target.value)}
+                                  className="w-full bg-white border border-slate-200 rounded-xl px-3 py-1.5 text-xs text-slate-700 font-semibold focus:border-gold-500 outline-none transition-colors"
+                                />
+                              </div>
+                            </div>
+
+                            <div>
+                              <span className="block text-[10px] font-black text-slate-500 uppercase tracking-wider mb-1.5">Conceptos o Productos Específicos</span>
+                              <input 
+                                type="text"
+                                placeholder="Ej: honorarios, gasolina, arrendamiento..."
+                                value={filterConcept}
+                                onChange={(e) => setFilterConcept(e.target.value)}
+                                className="w-full bg-white border border-slate-200 rounded-xl px-3 py-1.5 text-xs text-slate-700 font-medium focus:border-gold-500 outline-none transition-colors"
+                              />
+                            </div>
+                          </div>
+
+                          {/* Column 3: Predefined & Saved Presets */}
+                          <div className="bg-white p-4 rounded-2xl border border-slate-200 flex flex-col justify-between">
+                            <div>
+                              <span className="block text-[10px] font-black text-slate-400 uppercase tracking-wider mb-2">Filtros Guardados</span>
+                              
+                              <div className="flex flex-wrap gap-1 max-h-[80px] overflow-y-auto mb-2 content-start">
+                                {savedFilters.map((preset) => (
+                                  <div
+                                    key={preset.id}
+                                    onClick={() => applyPresetFilter(preset)}
+                                    className="text-[9px] bg-slate-50 hover:bg-gold-50 hover:text-gold-700 hover:border-gold-200 text-slate-650 px-2.5 py-1 rounded-lg border border-slate-200 font-bold flex items-center gap-1 transition-all cursor-pointer"
+                                    title="Aplicar preset"
+                                  >
+                                    <span>{preset.name}</span>
+                                    <span 
+                                      onClick={(e) => handleRemovePreset(preset.id, e)}
+                                      className="text-slate-400 hover:text-red-600 font-black ml-1 text-[11px] h-3 w-3 flex items-center justify-center rounded-full hover:bg-red-50"
+                                      title="Quitar preset"
+                                    >
+                                      ×
+                                    </span>
+                                  </div>
+                                ))}
+
+                                {savedFilters.length === 0 && (
+                                  <span className="text-[10px] text-slate-450 italic">Sin filtros guardados aún</span>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* Save Preset Form */}
+                            <form onSubmit={handleSaveCurrentFilter} className="flex gap-1 border-t border-slate-100 pt-2 shrink-0">
+                              <input 
+                                type="text"
+                                placeholder="Guardar como..."
+                                value={presetName}
+                                onChange={(e) => setPresetName(e.target.value)}
+                                className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1 text-[10px] font-semibold text-slate-700 focus:border-gold-400 outline-none transition-colors"
+                                required
+                              />
+                              <button
+                                type="submit"
+                                className="bg-slate-900 hover:bg-slate-800 text-white font-extrabold px-2.5 py-1 rounded-xl text-[9px] uppercase tracking-wider transition-all"
+                              >
+                                Guardar
+                              </button>
+                            </form>
+                          </div>
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
 
                   {/* Responsive Table Grid */}
                   <div className="overflow-x-auto rounded-xl border border-slate-150">
@@ -1389,7 +1378,7 @@ Genera las fórmulas fiscales con su desglose:
                                   <Info className="w-3.5 h-3.5" />
                                 </button>
                                 <button 
-                                  onClick={() => handleRemoveFile(idx)}
+                                  onClick={() => handleRemoveFileByFilename(item.fileName)}
                                   className="p-1.5 bg-red-50 hover:bg-red-100 text-red-600 hover:border-red-300 rounded transition-colors border border-red-200"
                                   title="Quitar factura"
                                 >
@@ -1520,439 +1509,12 @@ Genera las fórmulas fiscales con su desglose:
                 </div>
               )}
 
-            </motion.div>
-          )}
 
-          {/* TAB 2: SHEETS APPS SCRIPT IFRAME (LOOKS TOTALLY INTEGRATED) */}
-          {activeTab === 'sheets-console' && (
-            <motion.div
-              key="sheets-tab"
-              initial={{ opacity: 0, y: 15 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -15 }}
-              transition={{ duration: 0.2 }}
-              className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start"
-              id="sheets-console-container"
-            >
-              {/* Properties description sidebar */}
-              <div className="lg:col-span-4 space-y-6">
-                
-                <div className="bg-white p-6 md:p-8 rounded-3xl border border-slate-200/80 shadow-md">
-                  <h3 className="text-lg font-bold text-slate-800 mb-6 flex items-center gap-2">
-                    <CloudLightning className="w-5 h-5 text-gold-600" />
-                    Propiedades del Motor de Conciliación
-                  </h3>
-                  
-                  <div className="space-y-5">
-                    <div className="flex gap-4">
-                      <div className="bg-emerald-50 text-emerald-600 p-2.5 rounded-xl border border-emerald-100 h-10 w-10 shrink-0 flex items-center justify-center">
-                        <ShieldCheck className="w-5 h-5" />
-                      </div>
-                      <div>
-                        <h4 className="text-sm font-bold text-slate-800">Conexión Segura SSL</h4>
-                        <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-                          La transmisión de datos se encripta bajo la robusta infraestructura con certificado único SSL de alta seguridad.
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="flex gap-4">
-                      <div className="bg-amber-50 text-amber-600 p-2.5 rounded-xl border border-amber-100 h-10 w-10 shrink-0 flex items-center justify-center">
-                        <FileText className="w-5 h-5" />
-                      </div>
-                      <div>
-                        <h4 className="text-sm font-bold text-slate-800">Generación Consolidada</h4>
-                        <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-                          Guarde, filtre, consolide, comparta y descargue análisis de CFDI directamente en formatos listos para su hoja de cálculo.
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="flex gap-4">
-                      <div className="bg-blue-50 text-blue-600 p-2.5 rounded-xl border border-blue-100 h-10 w-10 shrink-0 flex items-center justify-center">
-                        <Monitor className="w-5 h-5" />
-                      </div>
-                      <div>
-                        <h4 className="text-sm font-bold text-slate-800">Análisis Automatizado</h4>
-                        <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-                          Procesa con precisión las sumas mensuales, complementos de pago y correspondencias fiscales sin errores humanos.
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="border-t border-slate-100 mt-6 pt-6 space-y-3">
-                    <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest">Enlace Alternativo del Servidor</h4>
-                    <button 
-                      onClick={handleCopyLink}
-                      className="w-full flex items-center justify-between p-3.5 bg-slate-50 hover:bg-gold-50/50 hover:border-gold-300 rounded-2xl border border-slate-200 text-xs font-semibold text-slate-600 transition-all group"
-                    >
-                      <span className="truncate pr-4 text-slate-500">{cpaCloudUrl}</span>
-                      {copied ? (
-                        <span className="flex items-center gap-1 text-emerald-600 shrink-0 font-bold">
-                          <Check className="w-4 h-4" /> Copiado
-                        </span>
-                      ) : (
-                        <span className="flex items-center gap-1 text-slate-400 group-hover:text-gold-700 shrink-0">
-                          <Copy className="w-4 h-4" /> Copiar Link
-                        </span>
-                      )}
-                    </button>
-                    <a 
-                      href={cpaCloudUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="w-full flex items-center justify-center gap-2 bg-slate-100 hover:bg-slate-200/70 text-slate-700 text-xs font-bold uppercase transition-all px-4 py-3 rounded-2xl border border-slate-200"
-                    >
-                      <ExternalLink className="w-4 h-4" />
-                      Ver en Pestaña Completa
-                    </a>
-                  </div>
-                </div>
-
-                {/* Helpful Hints Card style */}
-                <div className="bg-amber-50/70 border border-amber-200 rounded-3xl p-6 md:p-8 space-y-4 shadow-sm">
-                  <div className="flex items-start gap-3">
-                    <HelpCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
-                    <div className="space-y-1">
-                      <h4 className="text-sm font-bold text-amber-800">¿Dificultad al visualizar la consola?</h4>
-                      <p className="text-xs text-amber-700/90 leading-relaxed">
-                        Si experimenta bloqueos en el navegador por políticas de cookies o el inicio de sesión del SAT requiere interacción:
-                      </p>
-                    </div>
-                  </div>
-                  <ol className="list-decimal list-inside text-xs text-amber-800 space-y-2 pl-1 font-medium">
-                    <li>Seleccione el botón <span className="font-bold">"Ver en Pestaña Completa"</span> de arriba para abrir el motor directamente en una pestaña de Chrome independiente.</li>
-                    <li>Acceda de forma normal de forma de manera directa, y la información se sincronizará automáticamente.</li>
-                  </ol>
-                </div>
-
-              </div>
-
-              {/* Main Panel - Embedded interactive client console */}
-              <div className="lg:col-span-8 flex flex-col gap-4">
-                
-                {/* Visual Window Frame */}
-                <div className="bg-white rounded-3xl border border-slate-200 shadow-lg overflow-hidden flex flex-col">
-                  
-                  {/* Web Toolbar Mock */}
-                  <div className="bg-slate-900 text-white px-5 py-4 flex flex-wrap items-center justify-between gap-4 border-b border-slate-800">
-                    <div className="flex items-center gap-3">
-                      <div className="flex gap-1.5 shrink-0">
-                        <span className="w-3.5 h-3.5 rounded-full bg-red-400 inline-block" />
-                        <span className="w-3.5 h-3.5 rounded-full bg-amber-400 inline-block" />
-                        <span className="w-3.5 h-3.5 rounded-full bg-emerald-400 inline-block" />
-                      </div>
-                      <span className="text-xs text-slate-300 font-mono tracking-tight hidden sm:inline-block bg-white/5 border border-white/10 px-4.5 py-1.5 rounded-xl">
-                        isbb_server_reports://v4-engine
-                      </span>
-                    </div>
-
-                    <div className="flex items-center gap-3">
-                      <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-[10px] bg-emerald-500/15 text-emerald-400 border border-emerald-500/20 font-black uppercase tracking-wider">
-                        Enlace Listo
-                      </span>
-                      <button 
-                        onClick={handleRefreshIframe}
-                        className="flex items-center gap-1.5 text-xs text-slate-300 hover:text-white bg-white/5 hover:bg-white/10 px-3 py-1.5 rounded-xl border border-white/10 transition-colors font-bold"
-                      >
-                        <RefreshCw className={`w-3.5 h-3.5 ${loadingIframe ? 'animate-spin' : ''}`} />
-                        Reiniciar Motor
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Iframe View */}
-                  <div className="relative bg-white flex-1" style={{ minHeight: '680px' }}>
-                    {loadingIframe && (
-                      <div className="absolute inset-0 bg-slate-50/95 z-10 flex flex-col items-center justify-center text-center p-8">
-                        <div className="w-12 h-12 border-4 border-slate-200 border-t-gold-shiny rounded-full animate-spin mb-4" />
-                        <h3 className="text-lg font-bold text-slate-800">Iniciando Consola de Reportes...</h3>
-                        <p className="text-xs text-slate-400 mt-1 max-w-sm">Cargando módulos de compatibilidad para análisis y hojas de cálculo</p>
-                      </div>
-                    )}
-                    
-                    <iframe 
-                      key={iframeKey}
-                      src={cpaCloudUrl}
-                      onLoad={() => setLoadingIframe(false)}
-                      className="w-full h-[680px] md:h-[740px] lg:h-[800px] border-none block"
-                      allow="geolocation; microphone; camera"
-                      sandbox="allow-same-origin allow-scripts allow-popups allow-forms"
-                    />
-                  </div>
-
-                </div>
-
-              </div>
-            </motion.div>
-          )}
-
-          {/* TAB 3: AI CPA TAX COPILOT (CHAT Terminal) */}
-          {activeTab === 'ai-chat' && (
-            <motion.div
-              key="ai-chat-tab"
-              initial={{ opacity: 0, y: 15 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -15 }}
-              transition={{ duration: 0.2 }}
-              className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start"
-              id="ai-cpa-terminal-container"
-            >
               
-              {/* Left Column: Interactive Express Tax Calculator Form */}
-              <div className="lg:col-span-4 space-y-6">
-                
-                <div className="bg-white p-6 md:p-8 rounded-3xl border border-slate-200/80 shadow-md">
-                  <div className="flex items-center gap-2 mb-4">
-                    <div className="bg-amber-50 p-2 rounded-xl border border-amber-100">
-                      <Calculator className="w-6 h-6 text-gold-600" />
-                    </div>
-                    <div>
-                      <h3 className="text-lg font-bold text-slate-800">Cálculo Express SAT 2026</h3>
-                      <p className="text-xs text-slate-400 font-medium">Análisis rápido mediante IA</p>
-                    </div>
-                  </div>
 
-                  <p className="text-xs text-slate-500 mb-6 leading-relaxed">
-                    Ingrese los ingresos acumulados y deducciones brutas mensuales de su periodo de forma libre, seleccione su régimen contable y reciba una simulación tributaria inmediata.
-                  </p>
 
-                  <form onSubmit={handleCalculateTaxesManual} className="space-y-4">
-                    <div>
-                      <label className="block text-xs font-black text-slate-500 uppercase tracking-widest mb-1.5">Régimen Fiscal del Contribuyente</label>
-                      <select 
-                        value={regimen}
-                        onChange={(e) => setRegimen(e.target.value)}
-                        className="w-full bg-slate-50 outline-none border border-slate-200 p-3 rounded-xl focus:border-gold-500 focus:bg-white text-xs font-bold text-slate-800 transition-colors"
-                      >
-                        <option value="RESICO_PF">RESICO (Simplificado de Confianza - Pers. Física)</option>
-                        <option value="AE_P_F">Actividad Empresarial y Profesional</option>
-                        <option value="P_MORAL_GEN">Persona Moral (Régimen General)</option>
-                        <option value="RIF">Régimen de Incorporación Fiscal (RIF)</option>
-                        <option value="SUELDOS">Sueldos y Salarios / Asimilados</option>
-                      </select>
-                    </div>
 
-                    <div>
-                      <label className="block text-xs font-black text-slate-500 uppercase tracking-widest mb-1.5">Ingresos Totales Facturados ($ MXN)</label>
-                      <div className="relative">
-                        <span className="absolute left-3.5 top-1/2 -translate-y-1/2 font-bold text-slate-400 text-xs">$</span>
-                        <input 
-                          type="number" 
-                          value={ingresos}
-                          onChange={(e) => setIngresos(e.target.value)}
-                          placeholder="0.00"
-                          required
-                          className="w-full bg-slate-50 outline-none border border-slate-200 pl-8 pr-4 py-3 rounded-xl focus:border-gold-500 focus:bg-white text-xs font-extrabold text-slate-800 transition-colors"
-                        />
-                      </div>
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-black text-slate-500 uppercase tracking-widest mb-1.5">Deducciones Autorizadas con XML ($ MXN)</label>
-                      <div className="relative">
-                        <span className="absolute left-3.5 top-1/2 -translate-y-1/2 font-bold text-slate-400 text-xs">$</span>
-                        <input 
-                          type="number" 
-                          value={deducciones}
-                          onChange={(e) => setDeducciones(e.target.value)}
-                          placeholder="0.00"
-                          required
-                          className="w-full bg-slate-50 outline-none border border-slate-200 pl-8 pr-4 py-3 rounded-xl focus:border-gold-500 focus:bg-white text-xs font-extrabold text-slate-800 transition-colors"
-                        />
-                      </div>
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-black text-slate-500 uppercase tracking-widest mb-1.5">Retenciones del Periodo ($ MXN)</label>
-                      <div className="relative">
-                        <span className="absolute left-3.5 top-1/2 -translate-y-1/2 font-bold text-slate-400 text-xs">$</span>
-                        <input 
-                          type="number" 
-                          value={retenciones}
-                          onChange={(e) => setRetenciones(e.target.value)}
-                          placeholder="0.00"
-                          required
-                          className="w-full bg-slate-50 outline-none border border-slate-200 pl-8 pr-4 py-3 rounded-xl focus:border-gold-500 focus:bg-white text-xs font-extrabold text-slate-800 transition-colors"
-                        />
-                      </div>
-                    </div>
-
-                    <button
-                      type="submit"
-                      disabled={calculating}
-                      className="w-full bg-slate-900 border border-slate-800 hover:bg-slate-850 text-white py-3.5 rounded-xl text-xs font-black uppercase tracking-wider transition-all disabled:opacity-50 flex items-center justify-center gap-2 hover:border-gold-400/50 shadow-md group mt-6"
-                    >
-                      {calculating ? (
-                        <>
-                          <RefreshCw className="w-4 h-4 animate-spin text-gold-500" />
-                          Ejecutando Cálculos...
-                        </>
-                      ) : (
-                        <>
-                          <Calculator className="w-4 h-4 text-gold-400" />
-                          Generar Diagnóstico IA
-                        </>
-                      )}
-                    </button>
-                  </form>
-                </div>
-
-                {/* Preset Fast Queries Card */}
-                <div className="bg-gold-gradient rounded-3xl p-6 text-white border border-slate-800 shadow-md space-y-4 relative overflow-hidden">
-                  <div className="relative z-10">
-                    <h3 className="text-md font-extrabold text-wheat flex items-center gap-1.5 mb-2.5">
-                      <BookOpen className="w-4.5 h-4.5" />
-                      Consultas Frecuentes SAT
-                    </h3>
-                    <p className="text-[10px] text-slate-300 mb-4 leading-relaxed">
-                      Seleccione una opción para cargar y procesar una consulta contable avanzada de forma inmediata:
-                    </p>
-                    <div className="space-y-2.5">
-                      {[
-                        { text: '¿Qué deducciones personales aplican al año?', label: 'Deducciones Personales' },
-                        { text: 'Criterio de acreditamiento de IVA acreditable mensual', label: 'Criterios de IVA' },
-                        { text: '¿Cómo funciona la regla de RESICO y copropiedad?', label: 'RESICO Copropiedad' },
-                        { text: 'Causas comunes para Opinión de Cumplimiento Negativa', label: 'Opinión del SAT' }
-                      ].map((item, idx) => (
-                        <button
-                          key={idx}
-                          onClick={() => handleSendChatText(item.text)}
-                          disabled={sendingChat}
-                          className="w-full text-left bg-white/10 hover:bg-white/15 active:bg-white/20 p-3 rounded-2xl border border-white/5 text-xs text-white transition-all font-bold flex items-center justify-between group"
-                        >
-                          <span className="truncate pr-3">{item.label}</span>
-                          <ArrowRight className="w-4 h-4 text-wheat opacity-60 group-hover:opacity-100 group-hover:translate-x-1.5 transition-all" />
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="absolute top-0 right-0 -mr-16 -mt-16 w-36 h-36 bg-wheat/5 rounded-full blur-2xl" />
-                </div>
-
-              </div>
-
-              {/* Right Column: Conversational AI Accounting Terminal */}
-              <div className="lg:col-span-8 flex flex-col gap-4">
-                
-                <div className="bg-white rounded-3xl border border-slate-200 shadow-lg overflow-hidden flex flex-col h-[700px] md:h-[760px]">
-                  
-                  {/* Chat Terminal Header */}
-                  <div className="bg-slate-900 text-white px-5 py-4 flex items-center justify-between border-b border-slate-800">
-                    <div className="flex items-center gap-2.5">
-                      <div className="bg-wheat/10 p-2 rounded-xl">
-                        <Bot className="w-5 h-5 text-wheat" />
-                      </div>
-                      <div>
-                        <h4 className="text-sm font-extrabold tracking-tight text-white flex items-center gap-1.5">
-                          Asesoría Fiscal Corporativa
-                          <span className="text-[10px] bg-amber-500/10 text-wheat px-2 py-0.5 rounded-full border border-amber-500/20 uppercase tracking-widest font-black font-sans">EXPERTO SAT</span>
-                        </h4>
-                        <p className="text-[10px] text-slate-400 font-medium">Asesoría contable, cálculos de ISR/IVA, CFDI 4.0</p>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => {
-                          setChatHistory([
-                            {
-                              id: 'welcome',
-                              role: 'model',
-                              content: '¡Hola! Soy tu **Asesor Fiscal y Contable de ISBB SOLUCIONES**. Como especialista en la legislación del SAT mexicano, puedo ayudarte a analizar tus ingresos, deducir correctamente bajo tu régimen fiscal, simular pagos de ISR/IVA o resolver dudas sobre CFDI 4.0. \n\n¿En qué puedo asistirte técnicamente hoy?',
-                              timestamp: new Date()
-                            }
-                          ]);
-                          setCalcResult('');
-                        }}
-                        className="text-xs text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700/80 p-2 rounded-xl border border-slate-700 transition-colors font-bold"
-                        title="Resetear conversación"
-                      >
-                        Limpiar Historial
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Chat Messages Log */}
-                  <div className="flex-1 overflow-y-auto p-5 space-y-4 custom-scrollbar bg-slate-50/50">
-                    {chatHistory.map((message) => (
-                      <div
-                        key={message.id}
-                        className={`flex gap-3 max-w-[85%] ${message.role === 'user' ? 'ml-auto flex-row-reverse' : 'mr-auto'}`}
-                      >
-                        <div className={`p-2 rounded-xl h-9 w-9 shrink-0 flex items-center justify-center border font-bold ${
-                          message.role === 'user' 
-                            ? 'bg-amber-100 text-amber-700 border-amber-200' 
-                            : 'bg-slate-900 text-white border-slate-800'
-                        }`}>
-                          {message.role === 'user' ? <User className="w-4.5 h-4.5" /> : <Bot className="w-4.5 h-4.5 text-wheat" />}
-                        </div>
-                        
-                        <div className={`p-4.5 rounded-2xl text-xs space-y-1.5 shadow-sm border ${
-                          message.role === 'user'
-                            ? 'bg-amber-50 text-slate-800 border-amber-100 rounded-tr-none'
-                            : 'bg-white text-slate-700 border-slate-200/80 rounded-tl-none'
-                        }`}>
-                          <div className="prose prose-sm max-w-none text-xs">
-                            {renderMarkdownTextHTML(message.content)}
-                          </div>
-                          
-                          <div className="text-[9px] text-slate-400 font-mono flex items-center gap-1 justify-end pt-1">
-                            <span>{message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-
-                    {/* Chat sending state */}
-                    {sendingChat && (
-                      <div className="flex gap-3 max-w-[80%] mr-auto">
-                        <div className="p-2 rounded-xl h-9 w-9 shrink-0 flex items-center justify-center bg-slate-900 border border-slate-800">
-                          <Bot className="w-4.5 h-4.5 text-wheat" />
-                        </div>
-                        <div className="bg-white p-4.5 rounded-2xl text-xs text-slate-500 border border-slate-200/80 rounded-tl-none shadow-sm flex items-center gap-2">
-                          <span className="flex gap-1.5 items-center">
-                            <span className="w-1.5 h-1.5 rounded-full bg-gold-600 animate-bounce" style={{ animationDelay: '0ms' }} />
-                            <span className="w-1.5 h-1.5 rounded-full bg-gold-600 animate-bounce" style={{ animationDelay: '150ms' }} />
-                            <span className="w-1.5 h-1.5 rounded-full bg-gold-600 animate-bounce" style={{ animationDelay: '300ms' }} />
-                          </span>
-                          <span className="italic font-bold text-slate-400">Nuestro CPA Fiscal está respondiendo su consulta...</span>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Chat Input Toolbar Area */}
-                  <div className="p-4 bg-white border-t border-slate-200/80 flex gap-3">
-                    <input
-                      type="text"
-                      value={chatInput}
-                      onChange={(e) => setChatInput(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') handleSendChatText();
-                      }}
-                      disabled={sendingChat}
-                      placeholder="Escriba aquí su consulta o pregunta fiscal respecto a IVA/ISR..."
-                      className="flex-1 bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 text-xs font-bold text-slate-700 outline-none focus:border-gold-500 focus:bg-white transition-colors"
-                    />
-                    <button
-                      onClick={() => handleSendChatText()}
-                      disabled={sendingChat || !chatInput.trim()}
-                      className="bg-slate-900 text-white hover:bg-slate-850 p-3 rounded-2xl border border-slate-800 hover:border-gold-400/50 transition-colors duration-200 disabled:opacity-50 shrink-0 flex items-center justify-center"
-                    >
-                      <Send className="w-4 h-4" />
-                    </button>
-                  </div>
-
-                </div>
-
-              </div>
-              
-            </motion.div>
-          )}
-
-        </AnimatePresence>
+        </div>
       </main>
 
       {/* Footer */}
