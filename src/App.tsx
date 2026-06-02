@@ -14,6 +14,7 @@ import {
   Send,
   Bot,
   User,
+  Users,
   Calculator,
   Percent,
   TrendingUp,
@@ -33,10 +34,16 @@ import {
   BadgeAlert,
   Coins,
   Scale,
-  Award
+  Award,
+  Lock,
+  Eye,
+  EyeOff,
+  LogOut,
+  LogIn
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
+import AccountsManager from './components/AccountsManager';
 
 // Namespace and casing safe XML value extractor helpers
 const getAttrSafe = (el: Element | null, attrNames: string[]): string => {
@@ -137,13 +144,64 @@ const getFormaPagoName = (code: string): string => {
   return FORMA_PAGO_MAP[normalized] || 'Forma de pago no listada';
 };
 
+const getContractTypeName = (code: string): string => {
+  const map: Record<string, string> = {
+    '01': 'Contrato de trabajo por tiempo indeterminado',
+    '02': 'Contrato de trabajo por tiempo determinado',
+    '03': 'Contrato de trabajo por temporada',
+    '04': 'Contrato de trabajo por obra determinada',
+    '05': 'Contrato de trabajo por capacitación inicial',
+    '06': 'Contrato de trabajo por periodo de prueba',
+    '07': 'Contrato de trabajo por tiempo indeterminado sujeto a periodo de prueba',
+    '08': 'Contrato de trabajo por tiempo indeterminado con opción de capacitación inicial',
+    '09': 'Contrato de trabajo por tiempo indeterminado a tiempo parcial',
+    '10': 'Contrato de trabajo por tiempo indeterminado para el campo',
+    '99': 'Otro contrato'
+  };
+  return map[code.trim()] || 'Otro';
+};
+
+const getRegimenTypeName = (code: string): string => {
+  const map: Record<string, string> = {
+    '01': 'Sueldos',
+    '02': 'Sueldos (Sueldos y Salarios)',
+    '03': 'Jubilados',
+    '04': 'Pensionados',
+    '05': 'Asimilados Miembros Sociedades Cooperativas',
+    '06': 'Asimilados Integrantes Sociedades Civiles',
+    '07': 'Asimilados Miembros de Consejos',
+    '08': 'Asimilados Comisionistas',
+    '09': 'Asimilados Honorarios',
+    '10': 'Asimilados Acciones o Títulos',
+    '11': 'Asimilados Otros',
+    '12': 'Sueldos y salarios que no causan impuesto'
+  };
+  return map[code.trim()] || 'Sueldos y salarios';
+};
+
+const getPeriodicidadName = (code: string): string => {
+  const map: Record<string, string> = {
+    '01': 'Diario',
+    '02': 'Semanal',
+    '03': 'Catorcenal',
+    '04': 'Quincenal',
+    '05': 'Mensual',
+    '06': 'Bimestral',
+    '07': 'Unitaria',
+    '08': 'Comisión',
+    '09': 'Precio alzado',
+    '99': 'Otra Periodicidad'
+  };
+  return map[code.trim()] || 'Quincenal';
+};
+
 // Interface of extracted CFDI XML properties with detailed tax breakdown
 interface ParsedCFDI {
   fileName: string;
   folio: string;
   serie: string;
   fecha: string;
-  tipo: string; // 'I' (Ingreso), 'E' (Egreso), 'P' (Pago/Otros)
+  tipo: string; // 'I' (Ingreso), 'E' (Egreso), 'P' (Pago/Otros), 'N' (Nómina)
   subTotal: number;
   descuento: number;
   total: number;
@@ -167,6 +225,51 @@ interface ParsedCFDI {
   tasa0Base: number;
   tasa16Base: number;
   iepsTotal: number;
+
+  // Payroll/Nómina specific optional properties (ISBB premium suite)
+  isNomina?: boolean;
+  nominaVersion?: string;
+  nominaTipo?: string;
+  nominaFechaPago?: string;
+  nominaFechaInicialPago?: string;
+  nominaFechaFinalPago?: string;
+  nominaNumDiasPagados?: number;
+  nominaReceptorCurp?: string;
+  nominaReceptorNss?: string;
+  nominaReceptorTipoContrato?: string;
+  nominaReceptorTipoRegimen?: string;
+  nominaReceptorNumEmpleado?: string;
+  nominaReceptorPeriodicidadPago?: string;
+  nominaReceptorClaveEntFed?: string;
+  nominaTotalPercepciones?: number;
+  nominaTotalDeducciones?: number;
+  nominaTotalOtrosPagos?: number;
+  nominaNeto?: number;
+  nominaPercepcionesStr?: string;
+  nominaDeduccionesStr?: string;
+
+  // Granular payroll breakdown fields
+  percepcionSueldo?: number;
+  percepcionAguinaldoGrav?: number;
+  percepcionAguinaldoExent?: number;
+  percepcionPrimaVacGrav?: number;
+  percepcionPrimaVacExent?: number;
+  percepcionPrimaDomGrav?: number;
+  percepcionPrimaDomExent?: number;
+  percepcionHorasExtrasGrav?: number;
+  percepcionHorasExtrasExent?: number;
+  percepcionBonosGrav?: number;
+  percepcionBonosExent?: number;
+  percepcionPtuGrav?: number;
+  percepcionPtuExent?: number;
+  percepcionOtrosGrav?: number;
+  percepcionOtrosExent?: number;
+
+  deduccionIsr?: number;
+  deduccionImss?: number;
+  deduccionFondoAhorro?: number;
+  deduccionDescuentos?: number;
+  deduccionOtros?: number;
 }
 
 // Interface for filter preset
@@ -181,7 +284,212 @@ interface FilterPreset {
   conceptText: string;
 }
 
+// Interface for ANCOFI Access Accounts (Users)
+interface AncofiUser {
+  id: string;
+  email: string;
+  name: string;
+  role: 'Administrador' | 'Contador Senior' | 'Auditor' | 'Consultor';
+  status: 'Activo' | 'Inactivo';
+  createdAt: string;
+  password?: string;
+}
+
+// Interface for ANCOFI Managed Client Accounts
+interface AncofiClient {
+  id: string;
+  rfc: string;
+  name: string;
+  regimen: string;
+  email: string;
+  phone?: string;
+  registeredAt: string;
+}
+
+const DEFAULT_USERS: AncofiUser[] = [
+  {
+    id: 'user-1',
+    email: 'demo@ancofi.com',
+    name: 'Auditor de Pruebas',
+    role: 'Auditor',
+    status: 'Activo',
+    createdAt: '2026-01-10',
+    password: '123456'
+  },
+  {
+    id: 'user-2',
+    email: 'admin@ancofi.com',
+    name: 'Administrador General',
+    role: 'Administrador',
+    status: 'Activo',
+    createdAt: '2025-11-05',
+    password: 'admin'
+  },
+  {
+    id: 'user-3',
+    email: 'contable@ancofi.com',
+    name: 'Contador Fiscal',
+    role: 'Contador Senior',
+    status: 'Activo',
+    createdAt: '2026-02-14',
+    password: 'contable'
+  }
+];
+
+const DEFAULT_CLIENTS: AncofiClient[] = [
+  {
+    id: 'client-1',
+    rfc: 'ISM980121V98',
+    name: 'Industrias San Miguel S.A. de C.V.',
+    regimen: 'personas_morales',
+    email: 'contacto@sanmiguel.com.mx',
+    phone: '55 1234 5678',
+    registeredAt: '2026-01-15'
+  },
+  {
+    id: 'client-2',
+    rfc: 'GOMJ850524H89',
+    name: 'Juan Gómez Martínez',
+    regimen: 'resico_pf',
+    email: 'juan.gomez@gmail.com',
+    phone: '81 8765 4321',
+    registeredAt: '2026-02-02'
+  },
+  {
+    id: 'client-3',
+    rfc: 'LOM851201TY4',
+    name: 'Logística Metropolitana Express S.A.',
+    regimen: 'personas_morales',
+    email: 'finanzas@logmetrop.com',
+    phone: '33 9876 5432',
+    registeredAt: '2026-03-11'
+  }
+];
+
 export default function App() {
+  // --- LOGIN & GENERAL PLATFORM STATE ---
+  const [isLoggedIn, setIsLoggedIn] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('ancofi_logged_in') === 'true';
+    } catch (e) {
+      return false;
+    }
+  });
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [loginError, setLoginError] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Active platform tab: 'dashboard' (analizador XML) or 'accounts' (administrador de cuentas)
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'accounts'>('dashboard');
+
+  // Load access users from database or fallback to defaults
+  const [users, setUsers] = useState<AncofiUser[]>(() => {
+    try {
+      const saved = localStorage.getItem('ancofi_users');
+      if (saved) return JSON.parse(saved);
+    } catch (e) {
+      console.warn(e);
+    }
+    return DEFAULT_USERS;
+  });
+
+  // Save users whenever edited
+  React.useEffect(() => {
+    try {
+      localStorage.setItem('ancofi_users', JSON.stringify(users));
+    } catch (e) {
+      console.warn(e);
+    }
+  }, [users]);
+
+  // Load client companies accounts
+  const [clients, setClients] = useState<AncofiClient[]>(() => {
+    try {
+      const saved = localStorage.getItem('ancofi_clients');
+      if (saved) return JSON.parse(saved);
+    } catch (e) {
+      console.warn(e);
+    }
+    return DEFAULT_CLIENTS;
+  });
+
+  // Save clients whenever edited/added
+  React.useEffect(() => {
+    try {
+      localStorage.setItem('ancofi_clients', JSON.stringify(clients));
+    } catch (e) {
+      console.warn(e);
+    }
+  }, [clients]);
+
+  // Current logged in user metadata
+  const [currentUser, setCurrentUser] = useState<AncofiUser | null>(() => {
+    try {
+      const savedRole = localStorage.getItem('ancofi_current_user');
+      if (savedRole) return JSON.parse(savedRole);
+    } catch (e) {
+      console.warn(e);
+    }
+    return DEFAULT_USERS[0]; // fallback
+  });
+
+  // Filter the dashboard XML data by a specific Client Company (RFC) which is insanely helpful
+  const [selectedClientFilter, setSelectedClientFilter] = useState<string>('ALL');
+
+  const handleLogin = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanEmail = username.trim().toLowerCase();
+    const cleanPass = password.trim();
+
+    if (!cleanEmail || !cleanPass) {
+      setLoginError('Por favor, ingresa tu usuario y contraseña.');
+      return;
+    }
+    
+    setIsSubmitting(true);
+    setLoginError('');
+    
+    // Simulate slight natural verification delay for a premium feel
+    setTimeout(() => {
+      setIsSubmitting(false);
+      
+      // Dynamic validation against current accounts in the local state database!
+      const matchedUser = users.find(u => u.email.toLowerCase() === cleanEmail && (u.password || '123456') === cleanPass);
+      
+      if (!matchedUser) {
+        setLoginError('Credenciales incorrectas. Verifique correo y contraseña.');
+        return;
+      }
+
+      if (matchedUser.status === 'Inactivo') {
+        setLoginError('Su cuenta de acceso ANCOFI ha sido temporalmente desactivada por el administrador.');
+        return;
+      }
+      
+      setIsLoggedIn(true);
+      setCurrentUser(matchedUser);
+      try {
+        localStorage.setItem('ancofi_logged_in', 'true');
+        localStorage.setItem('ancofi_current_user', JSON.stringify(matchedUser));
+      } catch (e) {
+        console.warn(e);
+      }
+    }, 800);
+  };
+
+  const handleLogout = () => {
+    setIsLoggedIn(false);
+    setCurrentUser(null);
+    try {
+      localStorage.removeItem('ancofi_logged_in');
+      localStorage.removeItem('ancofi_current_user');
+    } catch (e) {
+      console.warn(e);
+    }
+  };
+
   // --- XML AUDITOR & TAX ANALYZER STATE ---
   const [isDragging, setIsDragging] = useState(false);
   const [uploadedFiles, setUploadedFiles] = useState<ParsedCFDI[]>([]);
@@ -220,6 +528,21 @@ export default function App() {
   const [filterRfcReceptor, setFilterRfcReceptor] = useState('');
   const [filterConcept, setFilterConcept] = useState('');
   const [presetName, setPresetName] = useState('');
+
+  // Subscription plans state
+  const [selectedPlanPeriod, setSelectedPlanPeriod] = useState<'monthly' | 'yearly'>('yearly');
+  const [checkoutModalPlan, setCheckoutModalPlan] = useState<{ name: string; price: string; period: string } | null>(null);
+  const [subscriptionSuccess, setSubscriptionSuccess] = useState(false);
+  const [paymentLoading, setPaymentLoading] = useState(false);
+  const [cardNumber, setCardNumber] = useState('');
+  const [cardName, setCardName] = useState('');
+  const [isSubscribedUser, setIsSubscribedUser] = useState(() => {
+    try {
+      return localStorage.getItem('isbb_ancofi_premium_active') === 'true';
+    } catch {
+      return false;
+    }
+  });
 
   // Local storage saved filters state
   const [savedFilters, setSavedFilters] = useState<FilterPreset[]>(() => {
@@ -424,12 +747,199 @@ export default function App() {
       }
     }
 
+    // --- PAYROLL (NÓMINA) DETECTOR & PARSER (ISBB PREMIUM ENGINE) ---
+    const nominaEl = getElementSafe(xmlDoc, ['nomina12:Nomina', 'Nomina', 'nomina11:Nomina', 'nomina:Nomina']);
+    const isNomina = !!nominaEl || tipo === 'N';
+
+    let nominaVersion = '';
+    let nominaTipo = '';
+    let nominaFechaPago = '';
+    let nominaFechaInicialPago = '';
+    let nominaFechaFinalPago = '';
+    let nominaNumDiasPagados = 0;
+    let nominaTotalPercepciones = 0;
+    let nominaTotalDeducciones = 0;
+    let nominaTotalOtrosPagos = 0;
+    let nominaNeto = 0;
+
+    let nominaReceptorCurp = '';
+    let nominaReceptorNss = '';
+    let nominaReceptorTipoContrato = '';
+    let nominaReceptorTipoRegimen = '';
+    let nominaReceptorNumEmpleado = '';
+    let nominaReceptorPeriodicidadPago = '';
+    let nominaReceptorClaveEntFed = '';
+
+    let nominaPercepcionesStr = '';
+    let nominaDeduccionesStr = '';
+
+    // Granular payroll breakdown variables
+    let percepcionSueldo = 0;
+    let percepcionAguinaldoGrav = 0;
+    let percepcionAguinaldoExent = 0;
+    let percepcionPrimaVacGrav = 0;
+    let percepcionPrimaVacExent = 0;
+    let percepcionPrimaDomGrav = 0;
+    let percepcionPrimaDomExent = 0;
+    let percepcionHorasExtrasGrav = 0;
+    let percepcionHorasExtrasExent = 0;
+    let percepcionBonosGrav = 0;
+    let percepcionBonosExent = 0;
+    let percepcionPtuGrav = 0;
+    let percepcionPtuExent = 0;
+    let percepcionOtrosGrav = 0;
+    let percepcionOtrosExent = 0;
+
+    let deduccionIsr = 0;
+    let deduccionImss = 0;
+    let deduccionFondoAhorro = 0;
+    let deduccionDescuentos = 0;
+    let deduccionOtros = 0;
+
+    if (isNomina) {
+      if (nominaEl) {
+        nominaVersion = getAttrSafe(nominaEl, ['Version', 'version']) || '1.1';
+        const rawTipoNomina = getAttrSafe(nominaEl, ['TipoNomina', 'tipoNomina']) || '';
+        if (rawTipoNomina === 'O') {
+          nominaTipo = 'O - Ordinaria';
+        } else if (rawTipoNomina === 'E') {
+          nominaTipo = 'E - Extraordinaria';
+        } else {
+          nominaTipo = rawTipoNomina || 'Ordinaria';
+        }
+        
+        nominaFechaPago = getAttrSafe(nominaEl, ['FechaPago', 'fechaPago']) || '';
+        nominaFechaInicialPago = getAttrSafe(nominaEl, ['FechaInicialPago', 'fechaInicialPago']) || '';
+        nominaFechaFinalPago = getAttrSafe(nominaEl, ['FechaFinalPago', 'fechaFinalPago']) || '';
+        nominaNumDiasPagados = parseFloat(getAttrSafe(nominaEl, ['NumDiasPagados', 'numDiasPagados']) || '0');
+        nominaTotalPercepciones = parseFloat(getAttrSafe(nominaEl, ['TotalPercepciones', 'totalPercepciones']) || '0');
+        nominaTotalDeducciones = parseFloat(getAttrSafe(nominaEl, ['TotalDeducciones', 'totalDeducciones']) || '0');
+        nominaTotalOtrosPagos = parseFloat(getAttrSafe(nominaEl, ['TotalOtrosPagos', 'totalOtrosPagos']) || '0');
+        
+        // Calculate net payroll
+        nominaNeto = nominaTotalPercepciones + nominaTotalOtrosPagos - nominaTotalDeducciones;
+        if (nominaNeto <= 0) {
+          nominaNeto = total;
+        }
+
+        // Parse payroll receptor inside the Nomina element
+        const nomReceptor = getElementSafe(nominaEl, ['nomina12:Receptor', 'Receptor', 'nomina11:Receptor', 'nomina:Receptor']);
+        if (nomReceptor) {
+          nominaReceptorCurp = getAttrSafe(nomReceptor, ['Curp', 'curp']);
+          nominaReceptorNss = getAttrSafe(nomReceptor, ['NumSeguridadSocial', 'numSeguridadSocial']);
+          const rawContrato = getAttrSafe(nomReceptor, ['TipoContrato', 'tipoContrato']);
+          nominaReceptorTipoContrato = rawContrato ? `${rawContrato} - ${getContractTypeName(rawContrato)}` : '';
+          const rawRegimen = getAttrSafe(nomReceptor, ['TipoRegimen', 'tipoRegimen']);
+          nominaReceptorTipoRegimen = rawRegimen ? `${rawRegimen} - ${getRegimenTypeName(rawRegimen)}` : '';
+          nominaReceptorNumEmpleado = getAttrSafe(nomReceptor, ['NumEmpleado', 'numEmpleado']);
+          const rawPeriodicidad = getAttrSafe(nomReceptor, ['PeriodicidadPago', 'periodicidadPago']);
+          nominaReceptorPeriodicidadPago = rawPeriodicidad ? `${rawPeriodicidad} - ${getPeriodicidadName(rawPeriodicidad)}` : '';
+          nominaReceptorClaveEntFed = getAttrSafe(nomReceptor, ['ClaveEntFed', 'claveEntFed']);
+        }
+
+        // Parse Percepciones
+        const percepcionesEl = getElementSafe(nominaEl, ['nomina12:Percepciones', 'Percepciones', 'nomina11:Percepciones', 'nomina:Percepciones']);
+        if (percepcionesEl) {
+          const percepcionList = getElementsSafe(percepcionesEl, ['nomina12:Percepcion', 'Percepcion', 'nomina11:Percepcion', 'nomina:Percepcion']);
+          const pArr = percepcionList.map(p => {
+            const rawTipoP = getAttrSafe(p, ['TipoPercepcion', 'tipoPercepcion']) || '';
+            const tipoP = rawTipoP.trim().padStart(3, '0');
+            const clave = getAttrSafe(p, ['Clave', 'clave']);
+            const concepto = getAttrSafe(p, ['Concepto', 'concepto']) || '';
+            const impGrav = parseFloat(getAttrSafe(p, ['ImporteGravado', 'importeGravado']) || '0');
+            const impEx = parseFloat(getAttrSafe(p, ['ImporteExento', 'importeExento']) || '0');
+            
+            // Classify percepciones
+            if (tipoP === '001') {
+              percepcionSueldo += (impGrav + impEx);
+            } else if (tipoP === '002') { // Aguinaldo / Gratificación Anual
+              percepcionAguinaldoGrav += impGrav;
+              percepcionAguinaldoExent += impEx;
+            } else if (tipoP === '021') { // Prima Vacacional
+              percepcionPrimaVacGrav += impGrav;
+              percepcionPrimaVacExent += impEx;
+            } else if (tipoP === '020') { // Prima Dominical
+              percepcionPrimaDomGrav += impGrav;
+              percepcionPrimaDomExent += impEx;
+            } else if (tipoP === '019') { // Horas extras
+              percepcionHorasExtrasGrav += impGrav;
+              percepcionHorasExtrasExent += impEx;
+            } else if (tipoP === '046') { // PTU
+              percepcionPtuGrav += impGrav;
+              percepcionPtuExent += impEx;
+            } else if (
+              tipoP === '038' || tipoP === '049' || tipoP === '050' ||
+              concepto.toUpperCase().includes('BONO') ||
+              concepto.toUpperCase().includes('PREMIO') ||
+              concepto.toUpperCase().includes('PRODUCTIVIDAD') ||
+              concepto.toUpperCase().includes('ASISTENCIA') ||
+              concepto.toUpperCase().includes('PUNTUALIDAD') ||
+              concepto.toUpperCase().includes('VALES') ||
+              concepto.toUpperCase().includes('FONDO')
+            ) {
+              percepcionBonosGrav += impGrav;
+              percepcionBonosExent += impEx;
+            } else {
+              percepcionOtrosGrav += impGrav;
+              percepcionOtrosExent += impEx;
+            }
+
+            return `${clave || 'S/C'} (${concepto || 'Sin concepto'}): Grav: $${impGrav.toFixed(2)}, Ex: $${impEx.toFixed(2)}`;
+          });
+          nominaPercepcionesStr = pArr.join(' | ');
+        }
+
+        // Parse Deducciones
+        const deduccionesEl = getElementSafe(nominaEl, ['nomina12:Deducciones', 'Deducciones', 'nomina11:Deducciones', 'nomina:Deducciones']);
+        if (deduccionesEl) {
+          const deduccionList = getElementsSafe(deduccionesEl, ['nomina12:Deduccion', 'Deduccion', 'nomina11:Deduccion', 'nomina:Deduccion']);
+          const dArr = deduccionList.map(d => {
+            const rawTipoD = getAttrSafe(d, ['TipoDeduccion', 'tipoDeduccion']) || '';
+            const tipoD = rawTipoD.trim().padStart(3, '0');
+            const clave = getAttrSafe(d, ['Clave', 'clave']);
+            const concepto = getAttrSafe(d, ['Concepto', 'concepto']) || '';
+            const imp = parseFloat(getAttrSafe(d, ['Importe', 'importe']) || '0');
+            
+            // Classify deducciones
+            if (tipoD === '002') {
+              deduccionIsr += imp;
+            } else if (tipoD === '001') { // IMSS / Seguridad Social
+              deduccionImss += imp;
+            } else if (tipoD === '005' || concepto.toUpperCase().includes('AHORRO') || concepto.toUpperCase().includes('CAJA')) { // Fondo de ahorro
+              deduccionFondoAhorro += imp;
+            } else if (
+              tipoD === '004' ||
+              concepto.toUpperCase().includes('DESCUENTO') ||
+              concepto.toUpperCase().includes('PRESTAMO') ||
+              concepto.toUpperCase().includes('PRÉSTAMO') ||
+              concepto.toUpperCase().includes('INFONAVIT') ||
+              concepto.toUpperCase().includes('FONACOT') ||
+              concepto.toUpperCase().includes('PENSION') ||
+              concepto.toUpperCase().includes('PENSIÓN') ||
+              concepto.toUpperCase().includes('SINDICATO')
+            ) {
+              deduccionDescuentos += imp;
+            } else {
+              deduccionOtros += imp;
+            }
+
+            return `${clave || 'S/C'} (${concepto || 'Sin concepto'}): $${imp.toFixed(2)}`;
+          });
+          nominaDeduccionesStr = dArr.join(' | ');
+        }
+      } else {
+        nominaVersion = '1.2';
+        nominaTipo = 'Nómina CFDI';
+        nominaNeto = total;
+      }
+    }
+
     return {
       fileName,
       folio: folio || 'S/F',
       serie: serie || '',
       fecha: fecha ? fecha.substring(0, 10) : 'S/F',
-      tipo,
+      tipo: isNomina ? 'N' : tipo,
       subTotal,
       descuento,
       total,
@@ -452,7 +962,51 @@ export default function App() {
       noObjetoImpuesto,
       tasa0Base,
       tasa16Base,
-      iepsTotal
+      iepsTotal,
+
+      // Payroll specific attributes
+      isNomina,
+      nominaVersion,
+      nominaTipo,
+      nominaFechaPago,
+      nominaFechaInicialPago,
+      nominaFechaFinalPago,
+      nominaNumDiasPagados,
+      nominaReceptorCurp,
+      nominaReceptorNss,
+      nominaReceptorTipoContrato,
+      nominaReceptorTipoRegimen,
+      nominaReceptorNumEmpleado,
+      nominaReceptorPeriodicidadPago,
+      nominaReceptorClaveEntFed,
+      nominaTotalPercepciones,
+      nominaTotalDeducciones,
+      nominaTotalOtrosPagos,
+      nominaNeto,
+      nominaPercepcionesStr,
+      nominaDeduccionesStr,
+
+      // Detailed parsed payroll items
+      percepcionSueldo,
+      percepcionAguinaldoGrav,
+      percepcionAguinaldoExent,
+      percepcionPrimaVacGrav,
+      percepcionPrimaVacExent,
+      percepcionPrimaDomGrav,
+      percepcionPrimaDomExent,
+      percepcionHorasExtrasGrav,
+      percepcionHorasExtrasExent,
+      percepcionBonosGrav,
+      percepcionBonosExent,
+      percepcionPtuGrav,
+      percepcionPtuExent,
+      percepcionOtrosGrav,
+      percepcionOtrosExent,
+      deduccionIsr,
+      deduccionImss,
+      deduccionFondoAhorro,
+      deduccionDescuentos,
+      deduccionOtros
     };
   };
 
@@ -534,6 +1088,14 @@ export default function App() {
   // Search filtering logic for the XML table with Advanced Filter controls
   const filteredFilesList = React.useMemo(() => {
     return sortedUploadedFiles.filter(item => {
+      // 0. Filter by Selected Client RFC (if active)
+      if (selectedClientFilter !== 'ALL') {
+        const matchesClient = 
+          item.emisorRfc.toUpperCase() === selectedClientFilter.toUpperCase() ||
+          item.receptorRfc.toUpperCase() === selectedClientFilter.toUpperCase();
+        if (!matchesClient) return false;
+      }
+
       // 1. Simple search query-matching
       if (xmlSearchQuery) {
         const q = xmlSearchQuery.toLowerCase();
@@ -591,7 +1153,7 @@ export default function App() {
 
       return true;
     });
-  }, [sortedUploadedFiles, xmlSearchQuery, filterStartDate, filterEndDate, filterCfdiType, filterRfcEmisor, filterRfcReceptor, filterConcept]);
+  }, [sortedUploadedFiles, xmlSearchQuery, filterStartDate, filterEndDate, filterCfdiType, filterRfcEmisor, filterRfcReceptor, filterConcept, selectedClientFilter]);
 
   // High performance computations on parsed XMLs, dynamically recalculating based on active advanced filters list
   const xmlTotals = React.useMemo(() => {
@@ -663,7 +1225,7 @@ export default function App() {
     };
   }, [filteredFilesList]);
 
-  // Export filtered catalog to standard Excel workbook (Chronological, strictly respecting active filter results)
+  // Export filtered catalog to standard Excel workbook (Chronological)
   const handleExportToExcel = () => {
     if (filteredFilesList.length === 0) return;
     
@@ -672,7 +1234,7 @@ export default function App() {
       'Archivo': f.fileName,
       'Serie': f.serie,
       'Folio': f.folio,
-      'Tipo CFDI': f.tipo === 'I' ? 'I - Ingreso (Cobros)' : f.tipo === 'E' ? 'E - Egreso (Gastos)' : 'P - Pago',
+      'Tipo CFDI': f.tipo === 'I' ? 'I - Ingreso (Cobros)' : f.tipo === 'E' ? 'E - Egreso (Gastos)' : f.tipo === 'N' ? 'N - Nómina (Sueldos)' : f.tipo === 'P' ? 'P - Pago' : 'Otros',
       'RFC Emisor': f.emisorRfc,
       'Razón Social Emisor': f.emisorNombre,
       'RFC Receptor': f.receptorRfc,
@@ -683,7 +1245,7 @@ export default function App() {
       'No Objeto a Impuesto ($)': f.noObjetoImpuesto,
       'Tasa 0% ($)': f.tasa0Base,
       'Tasa 16% ($)': f.tasa16Base,
-      'IVA ($)': f.tipo === 'I' ? f.ivaTrasladado : f.ivaAcreditable,
+      'IVA ($)': f.tipo === 'I' ? f.ivaTrasladado : f.tipo === 'E' ? f.ivaAcreditable : 0,
       'IEPS ($)': f.iepsTotal,
       'Retención de IVA ($)': f.ivaRetenido,
       'Retención de ISR ($)': f.isrRetenido,
@@ -695,9 +1257,71 @@ export default function App() {
       'Conceptos Principales': f.conceptos.join(' | ')
     }));
     
-    const worksheet = XLSX.utils.json_to_sheet(excelRows);
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Auditoría XML ISBB');
+    const worksheet = XLSX.utils.json_to_sheet(excelRows);
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Auditoría General');
+    
+    // Add distinct high-fidelity sheet for Payroll (Nómina) break down
+    const payrollFiles = filteredFilesList.filter(f => f.isNomina || f.tipo === 'N');
+    if (payrollFiles.length > 0) {
+      const payrollRows = payrollFiles.map(f => ({
+        'Archivo XML': f.fileName,
+        'Serie': f.serie || 'S/S',
+        'Folio': f.folio || 'S/F',
+        'Fecha Pago': f.nominaFechaPago || f.fecha,
+        'Periodo Inicial': f.nominaFechaInicialPago || '',
+        'Periodo Final': f.nominaFechaFinalPago || '',
+        'Días Pagados': f.nominaNumDiasPagados || 0,
+        'Tipo de Nómina': f.nominaTipo || 'Ordinaria',
+        'RFC Patrón (Emisor)': f.emisorRfc,
+        'Patrón (Emisor)': f.emisorNombre,
+        'RFC Trabajador (Receptor)': f.receptorRfc,
+        'Trabajador (Receptor)': f.receptorNombre,
+        'CURP Trabajador': f.nominaReceptorCurp || '',
+        'NSS Trabajador': f.nominaReceptorNss || '',
+        'No. de Empleado': f.nominaReceptorNumEmpleado || '',
+        'Periodicidad Pago': f.nominaReceptorPeriodicidadPago || '',
+        'Tipo Contrato': f.nominaReceptorTipoContrato || '',
+        'Tipo Régimen Directo': f.nominaReceptorTipoRegimen || '',
+        
+        // --- DESGLOSE DE PERCEPCIONES ---
+        'Sueldo Base ($)': f.percepcionSueldo || 0,
+        'Aguinaldo Gravado ($)': f.percepcionAguinaldoGrav || 0,
+        'Aguinaldo Exento ($)': f.percepcionAguinaldoExent || 0,
+        'Prima Vacacional Gravada ($)': f.percepcionPrimaVacGrav || 0,
+        'Prima Vacacional Exenta ($)': f.percepcionPrimaVacExent || 0,
+        'Prima Dominical Gravada ($)': f.percepcionPrimaDomGrav || 0,
+        'Prima Dominical Exenta ($)': f.percepcionPrimaDomExent || 0,
+        'Horas Extras Gravadas ($)': f.percepcionHorasExtrasGrav || 0,
+        'Horas Extras Exentas ($)': f.percepcionHorasExtrasExent || 0,
+        'PTU Gravado ($)': f.percepcionPtuGrav || 0,
+        'PTU Exento ($)': f.percepcionPtuExent || 0,
+        'Bonos y Premios Gravados ($)': f.percepcionBonosGrav || 0,
+        'Bonos y Premios Exentos ($)': f.percepcionBonosExent || 0,
+        'Otras Percepciones Gravadas ($)': f.percepcionOtrosGrav || 0,
+        'Otras Percepciones Exentas ($)': f.percepcionOtrosExent || 0,
+        'Total Percepciones ($)': f.nominaTotalPercepciones || 0,
+        
+        // --- DESGLOSE DE DEDUCCIONES ---
+        'ISR Retenido de Nómina ($)': f.deduccionIsr || 0,
+        'Seguridad Social IMSS ($)': f.deduccionImss || 0,
+        'Aportaciones Fondo de Ahorro ($)': f.deduccionFondoAhorro || 0,
+        'Descuentos y Préstamos ($)': f.deduccionDescuentos || 0,
+        'Otras Deducciones de Nómina ($)': f.deduccionOtros || 0,
+        'Total Deducciones ($)': f.nominaTotalDeducciones || 0,
+        
+        // --- NETO ---
+        'Total Otros Pagos ($)': f.nominaTotalOtrosPagos || 0,
+        'Total Neto Recibido por Trabajador ($)': f.nominaNeto || f.total,
+        
+        // --- CONCEPTOS CRUDOS DESCRIPTIVOS COMPLETO ---
+        'Toda la Percepción (SAT)': f.nominaPercepcionesStr || 'No especificada',
+        'Toda la Deducción (SAT)': f.nominaDeduccionesStr || 'No especificada'
+      }));
+      
+      const payrollWorksheet = XLSX.utils.json_to_sheet(payrollRows);
+      XLSX.utils.book_append_sheet(workbook, payrollWorksheet, 'Desglose de Nóminas');
+    }
     
     XLSX.writeFile(workbook, `Conciliacion_XML_ISBB_${new Date().toISOString().substring(0, 10)}.xlsx`);
   };
@@ -809,61 +1433,313 @@ export default function App() {
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900 flex flex-col antialiased">
       {/* Upper header segment */}
       <header className="bg-gold-gradient shadow-xl sticky top-0 z-40">
-        <div className="max-w-7xl mx-auto px-4 h-20 flex items-center justify-between">
+        <div className="max-w-7xl mx-auto px-4 min-h-[5rem] py-3 md:py-0 flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className="bg-white/10 backdrop-blur-md p-2.5 rounded-xl border border-white/20">
-              <FileSpreadsheet className="text-wheat w-7 h-7" />
+            <div className="bg-white/10 backdrop-blur-md p-2 rounded-xl border border-white/20">
+              <FileSpreadsheet className="text-wheat w-6 h-6" />
             </div>
             <div>
-              <h1 className="text-2xl font-black tracking-tighter text-white leading-none">
+              <h1 className="text-xl font-black tracking-tighter text-white leading-none text-shadow-sm">
                 ISBB <span className="text-wheat">SOLUCIONES</span>
               </h1>
-              <p className="text-[10px] text-wheat/70 font-medium uppercase tracking-[0.2em] mt-1">Portal Contable de Alta Gama</p>
+              <p className="text-[10px] text-wheat/90 font-bold uppercase tracking-wider mt-1.5">
+                ANCOFI: Análisis y Conciliación Fiscal
+              </p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <span className="bg-emerald-550/10 text-emerald-400 border border-emerald-500/20 text-[9px] font-bold px-3 py-1.5 rounded-full uppercase tracking-widest inline-flex items-center gap-1.5 bg-slate-800">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse inline-block" />
-              Sincronizado con el SAT
-            </span>
-          </div>
+
+          {/* Tab Navigation Menu & Settings */}
+          {isLoggedIn && (
+            <div className="flex flex-wrap items-center gap-2 md:gap-4">
+              <nav className="flex items-center bg-slate-900/40 p-1 rounded-xl border border-white/5">
+                <button
+                  onClick={() => setActiveTab('dashboard')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                    activeTab === 'dashboard'
+                      ? 'bg-wheat text-slate-950 shadow-sm'
+                      : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  <FileText className="w-3.5 h-3.5" />
+                  <span>Conciliador XML</span>
+                </button>
+                {currentUser?.email.toLowerCase() === 'demo@ancofi.com' && (
+                  <button
+                    onClick={() => setActiveTab('accounts')}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                      activeTab === 'accounts'
+                        ? 'bg-wheat text-slate-950 shadow-sm'
+                        : 'text-slate-300 hover:text-white'
+                    }`}
+                  >
+                    <Users className="w-3.5 h-3.5" />
+                    <span>Administración de Cuentas</span>
+                  </button>
+                )}
+              </nav>
+
+              <div className="h-6 w-px bg-white/10 hidden sm:block" />
+
+              {/* User Avatar Circle */}
+              <div className="flex items-center gap-2">
+                <div className="flex flex-col text-right hidden sm:flex">
+                  <span className="text-xs font-black text-white leading-none">
+                    {currentUser?.name || 'Usuario'}
+                  </span>
+                  <span className="text-[9px] text-wheat/70 font-mono tracking-wider mt-0.5 uppercase">
+                    {currentUser?.role || 'Auditor'}
+                  </span>
+                </div>
+                <div className="w-8 h-8 rounded-full bg-slate-900/60 border border-wheat/20 flex items-center justify-center font-bold text-xs text-wheat uppercase shadow-inner">
+                  {(currentUser?.name || 'U').substring(0, 2)}
+                </div>
+              </div>
+
+              <button
+                onClick={handleLogout}
+                title="Cerrar sesión de ANCOFI"
+                className="bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 hover:text-white rounded-xl px-3 py-1.5 text-xs font-bold flex items-center gap-1 transition-all cursor-pointer border border-rose-500/15"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span className="hidden xs:inline">Salir</span>
+              </button>
+            </div>
+          )}
+
+          {!isLoggedIn && (
+            <div className="flex items-center gap-2 self-end md:self-auto">
+              <span className="bg-amber-500/10 text-wheat border border-amber-500/20 text-[9px] font-bold px-3 py-1.5 rounded-full uppercase tracking-widest inline-flex items-center gap-1.5 bg-slate-800">
+                <ShieldCheck className="w-3.5 h-3.5 text-wheat animate-pulse" />
+                Acceso Resguardado
+              </span>
+            </div>
+          )}
         </div>
       </header>
 
-      {/* Hero Header Area */}
-      <div className="bg-slate-900 border-b border-slate-800 py-10 text-white relative overflow-hidden">
-        <div className="max-w-7xl mx-auto px-4 relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-8">
-          <div className="space-y-3 max-w-3xl">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] bg-slate-800 text-gold-300 font-black uppercase tracking-wider border border-slate-700">
-                <Award className="w-3.5 h-3.5 text-gold-400" /> Conciliador de XML Premium / ISBB
-              </span>
-              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] bg-blue-500/10 text-blue-300 font-black uppercase tracking-wider border border-blue-500/20">
-                <Shield className="w-3.5 h-3.5 text-blue-400" /> Facturación CFDI 4.0
-              </span>
+      {!isLoggedIn ? (
+        <div className="flex-1 flex flex-col items-center justify-start py-12 px-4 sm:px-6 lg:px-8 bg-slate-100 relative overflow-y-auto w-full">
+          {/* Decorative background orbits */}
+          <div className="absolute top-0 right-0 -mr-24 -mt-24 w-96 h-96 bg-wheat/5 rounded-full blur-3xl pointer-events-none" />
+          <div className="absolute bottom-0 left-0 -ml-24 -mb-24 w-96 h-96 bg-amber-550/10 rounded-full blur-3xl pointer-events-none" />
+
+          <motion.div 
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.5 }}
+            className="w-full max-w-4xl bg-white rounded-3xl overflow-hidden border border-slate-200 shadow-2xl grid grid-cols-1 md:grid-cols-12 min-h-[500px]"
+          >
+            {/* Left Brand Showcase Column */}
+            <div className="md:col-span-5 bg-slate-900 p-8 text-white flex flex-col justify-between relative overflow-hidden">
+              <div className="absolute inset-0 bg-gold-gradient opacity-10 pointer-events-none" />
+              <div className="space-y-6 relative z-10">
+                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-[10px] bg-slate-800 text-gold-300 font-extrabold uppercase tracking-widest border border-slate-700/60">
+                  <ShieldCheck className="w-3.5 h-3.5 text-gold-400" /> SISTEMA SEGURO
+                </div>
+                <div className="space-y-1">
+                  <p className="text-[10px] text-wheat/80 font-mono tracking-widest uppercase font-black">ISBB SOLUCIONES</p>
+                  <h3 className="text-3xl font-black text-white tracking-tight">
+                    ANCOFI
+                  </h3>
+                  <p className="text-xs text-slate-350 font-medium leading-relaxed">
+                    Análisis y Conciliación Fiscal de CFDIs bajo la infraestructura de ISBB.
+                  </p>
+                </div>
+
+                <div className="space-y-4 pt-4 border-t border-slate-800">
+                  <div className="flex items-start gap-3">
+                    <div className="mt-0.5 bg-amber-500/10 p-1.5 rounded-lg border border-amber-500/20">
+                      <FileSpreadsheet className="w-4 h-4 text-wheat" />
+                    </div>
+                    <div>
+                      <p className="text-xs font-bold text-white">Auditoría CFDI 4.0</p>
+                      <p className="text-[10px] text-slate-400">Conversión inmediata de archivos XML a análisis contables.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <div className="mt-0.5 bg-amber-500/10 p-1.5 rounded-lg border border-amber-500/20">
+                      <TrendingUp className="w-4 h-4 text-wheat" />
+                    </div>
+                    <div>
+                      <p className="text-xs font-bold text-white">Control Fiscal</p>
+                      <p className="text-[10px] text-slate-400">Declaraciones listas con desglose de tasas del SAT.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <div className="mt-0.5 bg-amber-500/10 p-1.5 rounded-lg border border-amber-500/20">
+                      <Bot className="w-4 h-4 text-wheat" />
+                    </div>
+                    <div>
+                      <p className="text-xs font-bold text-white">Análisis con Inteligencia Artificial</p>
+                      <p className="text-[10px] text-slate-400">Detección automática de inconsistencias en segundos.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="pt-8 relative z-10">
+                <p className="text-[9px] text-slate-400 font-mono">ANCOFI v2026.1 • Protegido con SSL de 256 bits</p>
+              </div>
             </div>
-            <h2 className="text-3xl md:text-4xl font-black text-white tracking-tight">
-              Análisis y Conciliación Fiscal de <span className="text-wheat">Archivos XML</span>
-            </h2>
-            <p className="text-slate-300 text-sm leading-relaxed">
-              Cargue de forma local, inmediata y segura sus archivos XML emitidos y recibidos del SAT. Obtenga visualización interactiva de sumas netas, exporte registros conciliados a Excel con desgloses tributarios completos por tasa y folio de manera cronológica.
-            </p>
-          </div>
-          
-          <div className="flex items-center gap-4 bg-slate-800/60 p-3.5 rounded-2xl border border-slate-700/50 self-start md:self-auto">
-            <div className="bg-wheat/10 p-2.5 rounded-xl">
-              <Bot className="text-wheat w-6 h-6" />
+
+            {/* Right Form Column */}
+            <div className="md:col-span-7 p-8 sm:p-12 flex flex-col justify-center bg-white">
+              <div className="space-y-6 max-w-md w-full mx-auto">
+                <div className="space-y-1">
+                  <h2 className="text-2xl font-black text-slate-900 tracking-tight">Ingreso al Sistema</h2>
+                  <p className="text-xs text-slate-500 font-medium">Proporcione sus credenciales fiscales para ingresar a la plataforma.</p>
+                </div>
+
+                <form onSubmit={handleLogin} className="space-y-4">
+                  {loginError && (
+                    <motion.div 
+                      initial={{ opacity: 0, y: -5 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="p-3 bg-red-50 border border-red-100 rounded-xl flex items-center gap-2 text-xs font-medium text-red-650"
+                    >
+                      <AlertTriangle className="w-4 h-4 text-red-500 flex-shrink-0" />
+                      <span>{loginError}</span>
+                    </motion.div>
+                  )}
+
+                  <div className="space-y-1.5">
+                    <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider block">Usuario / Correo Electrónico</label>
+                    <div className="relative">
+                      <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
+                        <User className="h-4 w-4 text-slate-400" />
+                      </div>
+                      <input
+                        type="email"
+                        required
+                        placeholder="ejemplo@ancofi.com"
+                        value={username}
+                        onChange={(e) => {
+                          setUsername(e.target.value);
+                          if (loginError) setLoginError('');
+                        }}
+                        className="block w-full pl-10 pr-4 py-2.5 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:border-amber-500 focus:bg-white focus:outline-none transition-all placeholder-slate-400 text-slate-800"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <div className="flex justify-between items-center">
+                      <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider">Contraseña</label>
+                    </div>
+                    <div className="relative">
+                      <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
+                        <Lock className="h-4 w-4 text-slate-400" />
+                      </div>
+                      <input
+                        type={showPassword ? "text" : "password"}
+                        required
+                        placeholder="••••••••"
+                        value={password}
+                        onChange={(e) => {
+                          setPassword(e.target.value);
+                          if (loginError) setLoginError('');
+                        }}
+                        className="block w-full pl-10 pr-10 py-2.5 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:border-amber-500 focus:bg-white focus:outline-none transition-all placeholder-slate-400 text-slate-800"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword(!showPassword)}
+                        className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600 cursor-pointer"
+                      >
+                        {showPassword ? (
+                          <EyeOff className="h-4 w-4" />
+                        ) : (
+                          <Eye className="h-4 w-4" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={isSubmitting}
+                    className="w-full mt-2 bg-gradient-to-r from-amber-600 to-amber-500 hover:from-amber-700 hover:to-amber-600 text-white font-black py-3 px-4 rounded-xl shadow-lg border-b-2 border-amber-700/40 hover:shadow-xl transition-all flex items-center justify-center gap-2 text-xs uppercase tracking-wider relative overflow-hidden active:scale-[0.98] cursor-pointer"
+                  >
+                    {isSubmitting ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin text-white" />
+                        <span>Verificando Acceso contable...</span>
+                      </>
+                    ) : (
+                      <>
+                        <LogIn className="w-4 h-4" />
+                        <span>INGRESA AL SISTEMA ANCOFI</span>
+                      </>
+                    )}
+                  </button>
+
+                  <div className="text-center pt-2">
+                    <p className="text-[10px] text-slate-450">
+                      Sugerencia de prueba: <span className="font-bold text-slate-500">demo@ancofi.com</span> y contraseña <span className="font-bold text-slate-500 font-mono">123456</span>
+                    </p>
+                  </div>
+                </form>
+              </div>
             </div>
-            <div>
-              <p className="text-xs text-slate-400 font-bold uppercase tracking-wider">Módulos Activos</p>
-              <p className="text-xs text-wheat font-medium">Consola de Control Fiscal Activa</p>
-            </div>
-          </div>
+          </motion.div>
         </div>
-        {/* Decorative background shapes */}
-        <div className="absolute top-0 right-0 -mr-24 -mt-24 w-80 h-80 bg-wheat/5 rounded-full blur-3xl pointer-events-none" />
-        <div className="absolute bottom-0 left-0 -ml-24 -mb-24 w-80 h-80 bg-gold-900/20 rounded-full blur-3xl pointer-events-none" />
-      </div>
+      ) : (
+        <>
+          {activeTab === 'dashboard' ? (
+            <>
+              {/* Hero Header Area */}
+              <div className="bg-slate-900 border-b border-slate-800 py-10 text-white relative overflow-hidden">
+                <div className="max-w-7xl mx-auto px-4 relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-8">
+                  <div className="space-y-3 max-w-3xl">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] bg-slate-800 text-gold-300 font-black uppercase tracking-wider border border-slate-705">
+                        <Award className="w-3.5 h-3.5 text-gold-400" /> Conciliador de XML Premium / ISBB
+                      </span>
+                      <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] bg-blue-500/10 text-blue-300 font-black uppercase tracking-wider border border-blue-500/20">
+                        <Shield className="w-3.5 h-3.5 text-blue-400" /> Facturación CFDI 4.0
+                      </span>
+                    </div>
+                    <h2 className="text-3xl md:text-4xl font-black text-white tracking-tight">
+                      Análisis y Conciliación Fiscal de <span className="text-wheat">Archivos XML</span>
+                    </h2>
+                    <p className="text-slate-300 text-sm leading-relaxed">
+                      Cargue de forma local, inmediata y segura sus archivos XML emitidos y recibidos del SAT. Obtenga visualización interactiva de sumas netas, exporte registros conciliados a Excel con desgloses tributarios completos por tasa y folio de manera cronológica.
+                    </p>
+                  </div>
+                  
+                  <div className="flex flex-col sm:flex-row gap-4 items-stretch sm:items-center self-start md:self-auto select-none">
+                    <div className="flex items-center gap-3.5 bg-slate-800/60 p-3.5 rounded-2xl border border-slate-700/50">
+                      <div className="bg-wheat/10 p-2 rounded-xl">
+                        <Bot className="text-wheat w-5 h-5 pointer-events-none" />
+                      </div>
+                      <div>
+                        <p className="text-[10px] text-slate-400 font-mono uppercase tracking-wider leading-none">Módulos Activos</p>
+                        <p className="text-[11px] text-wheat font-semibold mt-1">Consola Fiscal Activa</p>
+                      </div>
+                    </div>
+
+                    {/* Integrated dynamic client selector */}
+                    <div className="flex flex-col justify-center bg-slate-800/60 p-3.5 rounded-2xl border border-slate-700/50 min-w-[200px]">
+                      <label className="text-[9px] text-wheat uppercase font-black tracking-widest block mb-1 hover:text-white transition-colors">
+                        Empresa Cliente Selector:
+                      </label>
+                      <select
+                        value={selectedClientFilter}
+                        onChange={(e) => setSelectedClientFilter(e.target.value)}
+                        className="bg-slate-900 text-white text-xs rounded-xl px-2.5 py-1.5 focus:border-amber-500 focus:outline-none transition-all cursor-pointer font-bold border border-slate-700 focus:ring-1 focus:ring-amber-500"
+                      >
+                        <option value="ALL">🔍 Todos los CFDIs SAT</option>
+                        {clients.map(c => (
+                          <option key={c.id} value={c.rfc}>🏢 {c.name.substring(0, 18)}... ({c.rfc})</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+                {/* Decorative background shapes */}
+                <div className="absolute top-0 right-0 -mr-24 -mt-24 w-80 h-80 bg-wheat/5 rounded-full blur-3xl pointer-events-none" />
+                <div className="absolute bottom-0 left-0 -ml-24 -mb-24 w-80 h-80 bg-gold-900/20 rounded-full blur-3xl pointer-events-none" />
+              </div>
 
       {/* Main Container Layout */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 py-8 flex flex-col gap-8">
@@ -1214,6 +2090,7 @@ export default function App() {
                                 <option value="I">I - Ingresos (Ventas/Cobros)</option>
                                 <option value="E">E - Egresos (Gastos)</option>
                                 <option value="P">P - Complementos de Pago</option>
+                                <option value="N">N - Nóminas (Recibos de Sueldo)</option>
                               </select>
                             </div>
                           </div>
@@ -1342,9 +2219,11 @@ export default function App() {
                                   ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' 
                                   : item.tipo === 'E' 
                                     ? 'bg-amber-50 text-amber-700 border border-amber-100' 
-                                    : 'bg-slate-150 text-slate-600 border border-slate-200'
+                                    : item.tipo === 'N'
+                                      ? 'bg-indigo-50 text-indigo-700 border border-indigo-100'
+                                      : 'bg-slate-150 text-slate-600 border border-slate-200'
                               }`}>
-                                {item.tipo === 'I' ? 'Cobro (I)' : item.tipo === 'E' ? 'Gasto (E)' : `Pago (${item.tipo})`}
+                                {item.tipo === 'I' ? 'Cobro (I)' : item.tipo === 'E' ? 'Gasto (E)' : item.tipo === 'N' ? 'Nómina (N)' : `Pago (${item.tipo})`}
                               </span>
                             </td>
                             <td className="p-4 font-bold text-slate-600 font-mono">{item.fecha}</td>
@@ -1360,7 +2239,7 @@ export default function App() {
                               ${item.subTotal.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                             </td>
                             <td className="p-4 text-right font-mono text-slate-500">
-                              ${(item.tipo === 'I' ? item.ivaTrasladado : item.ivaAcreditable).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              ${(item.tipo === 'I' ? item.ivaTrasladado : item.tipo === 'E' ? item.ivaAcreditable : 0).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                             </td>
                             <td className="p-4 text-right font-mono text-amber-700">
                               ${item.isrRetenido.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
@@ -1504,10 +2383,174 @@ export default function App() {
                           ))}
                         </div>
                       </div>
+
+                      {selectedFile.isNomina && (
+                        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-white space-y-3">
+                          <p className="text-amber-400 font-extrabold text-[10px] border-b border-slate-800 pb-1.5 uppercase tracking-wider flex items-center gap-1.5">
+                            <Sparkles className="w-3.5 h-3.5" /> Desglose de Nómina (Complemento SAT)
+                          </p>
+                          <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-[10px]">
+                            <div>
+                              <span className="text-slate-400 block font-semibold">Tipo de Nómina:</span>
+                              <span className="font-bold text-slate-100">{selectedFile.nominaTipo || 'Ordinaria'}</span>
+                            </div>
+                            <div>
+                              <span className="text-slate-400 block font-semibold">Periodo Pago:</span>
+                              <span className="font-bold text-slate-100 truncate inline-block max-w-[130px]" title={`${selectedFile.nominaFechaInicialPago || '?'} al ${selectedFile.nominaFechaFinalPago || '?'}`}>
+                                {selectedFile.nominaFechaInicialPago || '?'} al {selectedFile.nominaFechaFinalPago || '?'}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="text-slate-400 block font-semibold">Días Pagados:</span>
+                              <span className="font-bold text-slate-100 font-mono">{selectedFile.nominaNumDiasPagados || 0} días</span>
+                            </div>
+                            <div>
+                              <span className="text-slate-400 block font-semibold">No. de Empleado:</span>
+                              <span className="font-bold text-slate-100 font-mono">{selectedFile.nominaReceptorNumEmpleado || 'N/A'}</span>
+                            </div>
+                            <div className="col-span-2">
+                              <span className="text-slate-400 block font-semibold">CURP o NSS del Trabajador:</span>
+                              <span className="font-bold text-slate-100 font-mono truncate block" title={`CURP: ${selectedFile.nominaReceptorCurp || 'N/A'} - NSS: ${selectedFile.nominaReceptorNss || 'N/A'}`}>
+                                CURP: {selectedFile.nominaReceptorCurp || 'N/A'} | NSS: {selectedFile.nominaReceptorNss || 'N/A'}
+                              </span>
+                            </div>
+                            <div className="col-span-2">
+                              <span className="text-slate-400 block font-semibold">Régimen Fiscal Receptor:</span>
+                              <span className="font-bold text-slate-100 truncate block font-sans" title={selectedFile.nominaReceptorTipoRegimen || 'N/A'}>{selectedFile.nominaReceptorTipoRegimen || 'N/A'}</span>
+                            </div>
+                            <div className="col-span-2">
+                              <span className="text-slate-400 block font-semibold">Tipo Contrato Laboral:</span>
+                              <span className="font-bold text-slate-100 truncate block font-sans" title={selectedFile.nominaReceptorTipoContrato || 'N/A'}>{selectedFile.nominaReceptorTipoContrato || 'N/A'}</span>
+                            </div>
+                          </div>
+                          
+                          <div className="w-full h-px bg-slate-800 my-1.5" />
+                          <div className="grid grid-cols-3 gap-2 text-center text-[9px] font-bold">
+                            <div className="bg-slate-950 p-2 rounded-xl border border-slate-800">
+                              <span className="text-slate-450 block text-[8px] uppercase font-bold">Percepciones</span>
+                              <span className="text-emerald-400 font-mono font-extrabold">${(selectedFile.nominaTotalPercepciones || 0).toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span>
+                            </div>
+                            <div className="bg-slate-950 p-2 rounded-xl border border-slate-800">
+                              <span className="text-slate-450 block text-[8px] uppercase font-bold">Deducciones</span>
+                              <span className="text-rose-400 font-mono font-extrabold">${(selectedFile.nominaTotalDeducciones || 0).toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span>
+                            </div>
+                            <div className="bg-indigo-950 p-2 rounded-xl border border-indigo-900/30">
+                              <span className="text-indigo-300 block text-[8px] uppercase font-bold">Neto Recibido</span>
+                              <span className="text-slate-100 font-mono font-extrabold">${(selectedFile.nominaNeto || 0).toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span>
+                            </div>
+                          </div>
+
+                          {/* Detailed In-App Payroll Receipt Breakdown */}
+                          <div className="bg-slate-950 p-3.5 rounded-2xl border border-slate-800 space-y-3.5 text-[10.5px]">
+                            <div>
+                              <p className="text-emerald-400 font-extrabold text-[9px] uppercase tracking-wider mb-2 border-b border-slate-900 pb-1.5 flex justify-between">
+                                <span>Percepciones Desglosadas</span>
+                                <span className="text-[7.5px] text-slate-400">Gravado / Exento</span>
+                              </p>
+                              <div className="space-y-1 bg-slate-900/45 p-1 rounded-lg">
+                                <div className="flex justify-between items-center px-1.5 py-1">
+                                  <span className="text-slate-400 font-medium">Sueldo Base (Importe Total):</span>
+                                  <span className="font-bold text-emerald-400 font-mono">${(selectedFile.percepcionSueldo || 0).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                                </div>
+                                <div className="flex justify-between items-center px-1.5 py-1">
+                                  <span className="text-slate-400 font-medium">Aguinaldo (Gratificación Anual):</span>
+                                  <span className="font-bold text-slate-200 font-mono text-[9.5px]">
+                                    ${(selectedFile.percepcionAguinaldoGrav || 0).toLocaleString('es-MX', { minimumFractionDigits: 2 })} <span className="text-slate-600 font-normal">/</span> <span className="text-emerald-400">${(selectedFile.percepcionAguinaldoExent || 0).toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span>
+                                  </span>
+                                </div>
+                                <div className="flex justify-between items-center px-1.5 py-1">
+                                  <span className="text-slate-400 font-medium">Prima Vacacional:</span>
+                                  <span className="font-bold text-slate-200 font-mono text-[9.5px]">
+                                    ${(selectedFile.percepcionPrimaVacGrav || 0).toLocaleString('es-MX', { minimumFractionDigits: 2 })} <span className="text-slate-600 font-normal">/</span> <span className="text-emerald-400">${(selectedFile.percepcionPrimaVacExent || 0).toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span>
+                                  </span>
+                                </div>
+                                <div className="flex justify-between items-center px-1.5 py-1">
+                                  <span className="text-slate-400 font-medium">Prima Dominical:</span>
+                                  <span className="font-bold text-slate-200 font-mono text-[9.5px]">
+                                    ${(selectedFile.percepcionPrimaDomGrav || 0).toLocaleString('es-MX', { minimumFractionDigits: 2 })} <span className="text-slate-600 font-normal">/</span> <span className="text-emerald-400">${(selectedFile.percepcionPrimaDomExent || 0).toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span>
+                                  </span>
+                                </div>
+                                <div className="flex justify-between items-center px-1.5 py-1">
+                                  <span className="text-slate-400 font-medium">Horas Extras:</span>
+                                  <span className="font-bold text-slate-200 font-mono text-[9.5px]">
+                                    ${(selectedFile.percepcionHorasExtrasGrav || 0).toLocaleString('es-MX', { minimumFractionDigits: 2 })} <span className="text-slate-600 font-normal">/</span> <span className="text-emerald-400">${(selectedFile.percepcionHorasExtrasExent || 0).toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span>
+                                  </span>
+                                </div>
+                                <div className="flex justify-between items-center px-1.5 py-1">
+                                  <span className="text-slate-400 font-medium">Reparto de Utilidades PTU:</span>
+                                  <span className="font-bold text-slate-200 font-mono text-[9.5px]">
+                                    ${(selectedFile.percepcionPtuGrav || 0).toLocaleString('es-MX', { minimumFractionDigits: 2 })} <span className="text-slate-600 font-normal">/</span> <span className="text-emerald-400">${(selectedFile.percepcionPtuExent || 0).toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span>
+                                  </span>
+                                </div>
+                                <div className="flex justify-between items-center px-1.5 py-1">
+                                  <span className="text-slate-400 font-medium">Bonos, Premios y Vales:</span>
+                                  <span className="font-bold text-slate-200 font-mono text-[9.5px]">
+                                    ${(selectedFile.percepcionBonosGrav || 0).toLocaleString('es-MX', { minimumFractionDigits: 2 })} <span className="text-slate-600 font-normal">/</span> <span className="text-emerald-400">${(selectedFile.percepcionBonosExent || 0).toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span>
+                                  </span>
+                                </div>
+                                {(selectedFile.percepcionOtrosGrav || 0) + (selectedFile.percepcionOtrosExent || 0) > 0 && (
+                                  <div className="flex justify-between items-center px-1.5 py-1">
+                                    <span className="text-slate-400 font-medium">Otros Estímulos / Percepciones:</span>
+                                    <span className="font-bold text-slate-200 font-mono text-[9.5px]">
+                                      ${(selectedFile.percepcionOtrosGrav || 0).toLocaleString('es-MX', { minimumFractionDigits: 2 })} <span className="text-slate-600 font-normal">/</span> <span className="text-emerald-400">${(selectedFile.percepcionOtrosExent || 0).toLocaleString('es-MX', { minimumFractionDigits: 2 })}</span>
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+
+                            <div>
+                              <p className="text-rose-450 font-extrabold text-[9px] uppercase tracking-wider mb-2 border-b border-slate-900 pb-1.5">
+                                Deducciones Desglosadas
+                              </p>
+                              <div className="space-y-1 bg-slate-900/45 p-1 rounded-lg">
+                                <div className="flex justify-between items-center px-1.5 py-1">
+                                  <span className="text-slate-400 font-medium">Imposición ISR Retenido:</span>
+                                  <span className="font-bold text-rose-400 font-mono">${(selectedFile.deduccionIsr || 0).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                                </div>
+                                <div className="flex justify-between items-center px-1.5 py-1">
+                                  <span className="text-slate-400 font-medium">Seguridad Social IMSS:</span>
+                                  <span className="font-bold text-rose-400 font-mono">${(selectedFile.deduccionImss || 0).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                                </div>
+                                <div className="flex justify-between items-center px-1.5 py-1">
+                                  <span className="text-slate-400 font-medium">Fondo de Ahorro / Caja:</span>
+                                  <span className="font-bold text-rose-400 font-mono">${(selectedFile.deduccionFondoAhorro || 0).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                                </div>
+                                <div className="flex justify-between items-center px-1.5 py-1">
+                                  <span className="text-slate-400 font-medium">Descuentos, Créditos e Infonavit:</span>
+                                  <span className="font-bold text-rose-400 font-mono">${(selectedFile.deduccionDescuentos || 0).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                                </div>
+                                {(selectedFile.deduccionOtros || 0) > 0 && (
+                                  <div className="flex justify-between items-center px-1.5 py-1">
+                                    <span className="text-slate-400 font-medium">Otras Deducciones / Sindicato:</span>
+                                    <span className="font-bold text-rose-400 font-mono">${(selectedFile.deduccionOtros || 0).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
+                          {selectedFile.nominaPercepcionesStr && (
+                            <div className="text-[9.5px] mt-2 bg-slate-950 p-2.5 rounded-lg border border-slate-800/80 max-h-[100px] overflow-y-auto">
+                              <span className="text-emerald-400 font-bold uppercase block mb-1">Conceptos SAT Percepciones (Crudo):</span>
+                              <p className="text-slate-300 leading-normal font-sans">{selectedFile.nominaPercepcionesStr}</p>
+                            </div>
+                          )}
+
+                          {selectedFile.nominaDeduccionesStr && (
+                            <div className="text-[9.5px] mt-2 bg-slate-950 p-2.5 rounded-lg border border-slate-800/80 max-h-[100px] overflow-y-auto">
+                              <span className="text-rose-400 font-bold uppercase block mb-1">Conceptos SAT Deducciones (Crudo):</span>
+                              <p className="text-slate-300 leading-normal font-sans">{selectedFile.nominaDeduccionesStr}</p>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
               )}
+
+              {/* No subscription plans information banner */}
 
 
               
@@ -1516,6 +2559,265 @@ export default function App() {
 
         </div>
       </main>
+            </>
+          ) : (
+            <>
+              {currentUser?.email.toLowerCase() === 'demo@ancofi.com' ? (
+                <>
+                  {/* Hero Banner Area for Administration view */}
+                  <div className="bg-slate-900 border-b border-slate-800 py-10 text-white relative overflow-hidden">
+                    <div className="max-w-7xl mx-auto px-4 relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-8 animate-fade-in">
+                      <div className="space-y-3 max-w-3xl">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] bg-slate-800 text-gold-300 font-black uppercase tracking-wider border border-slate-705">
+                            <Users className="w-3.5 h-3.5 text-gold-400" /> Administración ANCOFI
+                          </span>
+                          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] bg-emerald-500/10 text-emerald-300 font-black uppercase tracking-wider border border-emerald-500/20">
+                            <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" /> Resguardo de Accesos SSL
+                          </span>
+                        </div>
+                        <h2 className="text-3xl md:text-4xl font-black text-white tracking-tight">
+                          Administrar <span className="text-wheat">Cuentas & Clientes</span>
+                        </h2>
+                        <p className="text-slate-300 text-sm leading-relaxed">
+                          Catálogo centralizado de autoría contable. Agregue nuevos usuarios autorizados, otorgue diferentes roles de auditoría, desactive accesos dinámicamente, e incorpore las razones sociales de clientes para segregar y clasificar CFDIs XML de forma automatizada por RFC.
+                        </p>
+                      </div>
+                      
+                      <div className="flex items-center gap-4 bg-slate-800/60 p-3.5 rounded-2xl border border-slate-700/50 self-start md:self-auto select-none">
+                        <div className="bg-wheat/10 p-2.5 rounded-xl">
+                          <Users className="text-wheat w-6 h-6" />
+                        </div>
+                        <div>
+                          <p className="text-[10px] text-slate-400 font-mono uppercase tracking-wider leading-none">Cuentas Activas</p>
+                          <p className="text-xs text-wheat font-semibold mt-1.5">
+                            {users.filter(u => u.status === 'Activo').length} Auditores • {clients.length} Empresas
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                    {/* Decorative background shapes */}
+                    <div className="absolute top-0 right-0 -mr-24 -mt-24 w-80 h-80 bg-wheat/5 rounded-full blur-3xl pointer-events-none" />
+                    <div className="absolute bottom-0 left-0 -ml-24 -mb-24 w-80 h-80 bg-gold-900/20 rounded-full blur-3xl pointer-events-none" />
+                  </div>
+
+                  {/* Main Container Layout for Administration Panel */}
+                  <main className="flex-1 max-w-7xl w-full mx-auto px-4 py-8 flex flex-col gap-8 animate-fade-in">
+                    <AccountsManager 
+                      users={users} 
+                      setUsers={setUsers} 
+                      clients={clients} 
+                      setClients={setClients}
+                      currentUser={currentUser}
+                    />
+                  </main>
+                </>
+              ) : (
+                <main className="flex-1 max-w-3xl w-full mx-auto px-4 py-16 flex flex-col items-center justify-center text-center gap-6 animate-fade-in">
+                  <div className="w-20 h-20 bg-rose-500/10 rounded-full flex items-center justify-center border-2 border-rose-500/20 text-rose-500 shadow-xl shadow-rose-500/5">
+                    <AlertTriangle className="w-10 h-10 text-rose-500" />
+                  </div>
+                  <div className="space-y-2">
+                    <h3 className="text-2xl font-black text-slate-900 tracking-tight">Acceso Altamente Restringido</h3>
+                    <p className="text-sm text-slate-555 max-w-md leading-relaxed">
+                      Por políticas estrictas de seguridad de <strong className="text-slate-900">ISBB Soluciones</strong>, solamente el personal con cuenta de <strong className="text-slate-900">Auditor de Pruebas</strong> del Sistema ANCOFI (<code className="bg-slate-100 px-1 py-0.5 rounded text-amber-600 font-bold font-mono text-[11px]">demo@ancofi.com</code>) está autorizado para administrar accesos y cuentas.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setActiveTab('dashboard')}
+                    className="bg-slate-900 hover:bg-slate-800 text-white font-black text-xs px-6 py-3 rounded-2xl shadow-lg hover:shadow-xl transition-all hover:text-wheat cursor-pointer active:scale-95 flex items-center gap-2"
+                  >
+                    <span>Regresar al Conciliador XML</span>
+                  </button>
+                </main>
+              )}
+            </>
+          )}
+        </>
+      )}
+
+      {/* Checkout Modal */}
+      {checkoutModalPlan && (
+        <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="bg-white rounded-3xl max-w-md w-full overflow-hidden shadow-2xl border border-slate-200 flex flex-col"
+          >
+            <div className="bg-slate-900 p-6 text-white flex justify-between items-center relative overflow-hidden">
+              <div className="absolute inset-0 bg-gold-gradient opacity-10 pointer-events-none" />
+              <div className="relative z-10">
+                <span className="bg-amber-500/10 text-wheat border border-amber-500/20 text-[9px] font-bold px-2.5 py-1 rounded-full uppercase tracking-wider">
+                  Pago Seguro SSL de 256 bits
+                </span>
+                <h4 className="font-extrabold text-lg text-white mt-1.5 flex items-center gap-1.5">
+                  <Lock className="w-5 h-5 text-wheat" />
+                  Suscripción ANCOFI
+                </h4>
+              </div>
+              <button 
+                onClick={() => {
+                  setCheckoutModalPlan(null);
+                  setSubscriptionSuccess(false);
+                  setCardNumber('');
+                  setCardName('');
+                }}
+                className="bg-white/10 hover:bg-white/20 px-3 py-1.5 text-xs rounded-xl text-slate-300 hover:text-white border border-white/5 transition-colors font-bold z-10 cursor-pointer"
+              >
+                Cancelar
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4">
+              {subscriptionSuccess ? (
+                <div className="text-center py-6 space-y-4">
+                  <div className="w-16 h-16 bg-emerald-100 rounded-full flex items-center justify-center mx-auto text-emerald-600 border border-emerald-205">
+                    <CheckCircle2 className="w-10 h-10" />
+                  </div>
+                  <div className="space-y-1">
+                    <h3 className="text-xl font-black text-slate-900">¡Suscripción Activada!</h3>
+                    <p className="text-xs text-slate-500 font-medium">
+                      Gracias por confiar en <strong className="text-slate-800">ISBB Soluciones</strong>. El Sistema ANCOFI ahora está completamente desbloqueado para sus CFDIs.
+                    </p>
+                  </div>
+                  <div className="bg-slate-50 p-4 rounded-2xl border border-slate-150 inline-block w-full">
+                    <p className="text-[10px] text-slate-400 font-mono uppercase">ID Transacción:</p>
+                    <p className="text-xs font-mono font-bold text-slate-800">TXN-ISBB-{Math.floor(100000 + Math.random() * 900000)}</p>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setCheckoutModalPlan(null);
+                      setSubscriptionSuccess(false);
+                      setCardNumber('');
+                      setCardName('');
+                    }}
+                    className="w-full bg-slate-900 hover:bg-slate-800 text-white font-black py-3 rounded-2xl text-xs transition-all uppercase tracking-wider cursor-pointer"
+                  >
+                    Empezar a usar Premium
+                  </button>
+                </div>
+              ) : (
+                <form 
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    setPaymentLoading(true);
+                    setTimeout(() => {
+                      setPaymentLoading(false);
+                      setSubscriptionSuccess(true);
+                      setIsSubscribedUser(true);
+                      try {
+                        localStorage.setItem('isbb_ancofi_premium_active', 'true');
+                      } catch(err) {
+                        console.warn(err);
+                      }
+                    }, 1800);
+                  }}
+                  className="space-y-4"
+                >
+                  <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex items-center justify-between">
+                    <div>
+                      <p className="text-[10px] text-slate-400 font-bold uppercase">Plan Seleccionado:</p>
+                      <p className="text-sm font-black text-slate-800">{checkoutModalPlan.name}</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-lg font-black text-amber-600">{checkoutModalPlan.price}</p>
+                      <p className="text-[10px] text-slate-400 font-mono font-bold">{checkoutModalPlan.period}</p>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-black text-slate-600 uppercase tracking-wider">Nombre del Titular</label>
+                    <input 
+                      type="text"
+                      required
+                      placeholder="Ej. Isaac Buitimea"
+                      value={cardName}
+                      onChange={(e) => setCardName(e.target.value)}
+                      className="w-full px-3.5 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:border-amber-500 focus:bg-white focus:outline-none transition-all placeholder-slate-400 text-slate-800 font-medium"
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-black text-slate-600 uppercase tracking-wider">Número de Tarjeta</label>
+                    <div className="relative">
+                      <input 
+                        type="text"
+                        required
+                        maxLength={19}
+                        placeholder="4000 1234 5678 9010"
+                        value={cardNumber}
+                        onChange={(e) => {
+                          let v = e.target.value.replace(/\s+/g, '').replace(/[^0-9]/gi, '');
+                          let matches = v.match(/\d{4,16}/g);
+                          let match = matches && matches[0] || '';
+                          let parts = [];
+                          for (let i=0, len=match.length; i<len; i+=4) {
+                            parts.push(match.substring(i, i+4));
+                          }
+                          if (parts.length > 0) {
+                            setCardNumber(parts.join(' '));
+                          } else {
+                            setCardNumber(v);
+                          }
+                        }}
+                        className="w-full pl-3.5 pr-12 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:border-amber-500 focus:bg-white focus:outline-none transition-all placeholder-slate-400 text-slate-800 font-mono font-bold"
+                      />
+                      <div className="absolute right-3.5 inset-y-0 flex items-center text-slate-400 font-black text-xs">
+                        💳
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-black text-slate-600 uppercase tracking-wider">Vencimiento</label>
+                      <input 
+                        type="text"
+                        required
+                        maxLength={5}
+                        placeholder="MM/AA"
+                        className="w-full px-3.5 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:border-amber-500 focus:bg-white focus:outline-none transition-all placeholder-slate-400 text-slate-800 font-mono font-bold"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-black text-slate-600 uppercase tracking-wider">CVV</label>
+                      <input 
+                        type="password"
+                        required
+                        maxLength={4}
+                        placeholder="•••"
+                        className="w-full px-3.5 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:border-amber-500 focus:bg-white focus:outline-none transition-all placeholder-slate-400 text-slate-800 font-mono font-bold"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="text-[10px] text-slate-450 text-center flex items-center justify-center gap-1.5">
+                    <span>🔒 Datos cifrados bajo estándares de seguridad ISBB Bancaria</span>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={paymentLoading}
+                    className="w-full mt-2 bg-gradient-to-r from-amber-600 to-amber-500 hover:from-amber-700 hover:to-amber-600 text-white font-black py-3 px-4 rounded-xl shadow-lg border-b-2 border-amber-700/40 hover:shadow-xl transition-all flex items-center justify-center gap-2 text-xs uppercase tracking-wider relative overflow-hidden cursor-pointer"
+                  >
+                    {paymentLoading ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin text-white" />
+                        <span>Verificando Fondos...</span>
+                      </>
+                    ) : (
+                      <>
+                        <ShieldCheck className="w-4 h-4 text-wheat" />
+                        <span>Confirmar Pago de {checkoutModalPlan.price}</span>
+                      </>
+                    )}
+                  </button>
+                </form>
+              )}
+            </div>
+          </motion.div>
+        </div>
+      )}
 
       {/* Footer */}
       <footer className="bg-slate-900 py-16 text-center border-t-4 border-wheat mt-auto">
@@ -1523,12 +2825,12 @@ export default function App() {
           <h2 className="text-3xl font-black text-white tracking-tighter mb-4">
             ISBB <span className="text-wheat">SOLUCIONES</span>
           </h2>
-          <p className="text-wheat/40 text-xs font-bold uppercase tracking-[0.4em]">
-            Inteligencia Contable & Soluciones Fiscales Avanzadas
+          <p className="text-wheat/40 text-xs font-bold uppercase tracking-[0.3em]">
+            ANCOFI: SISTEMA DE ANÁLISIS Y CONCILIACIÓN FISCAL
           </p>
           <div className="w-12 h-1 bg-wheat mx-auto my-8 rounded-full opacity-30" />
           <p className="text-white/20 text-[10px] font-medium tracking-wider">
-            © {new Date().getFullYear()} ISBB SOLUCIONES - Plataforma Especializada en Automatización y Reportes SAT
+            © {new Date().getFullYear()} ISBB SOLUCIONES - Plataforma Especializada en Automatización Contable y Conciliación SAT (Sistema ANCOFI)
           </p>
         </div>
       </footer>
