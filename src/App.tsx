@@ -270,6 +270,9 @@ interface ParsedCFDI {
   deduccionFondoAhorro?: number;
   deduccionDescuentos?: number;
   deduccionOtros?: number;
+  fechaHoraRaw?: string;
+  hora?: string;
+  isCancelada?: boolean;
 }
 
 // Interface for filter preset
@@ -934,12 +937,31 @@ export default function App() {
       }
     }
 
+    let parsedHora = '';
+    if (fecha && fecha.includes('T')) {
+      parsedHora = fecha.split('T')[1].substring(0, 8);
+    } else {
+      parsedHora = '00:00:00';
+    }
+
+    const lowerFileName = fileName.toLowerCase();
+    const isCancelada = 
+      lowerFileName.includes('cancelada') || 
+      lowerFileName.includes('cancelado') || 
+      lowerFileName.includes('cancel') || 
+      (total === 0 && subTotal === 0 && (tipo === 'I' || tipo === 'E')) ||
+      !comprobante || 
+      xmlDoc.documentElement.nodeName.toLowerCase().includes('cancel');
+
     return {
       fileName,
       folio: folio || 'S/F',
       serie: serie || '',
       fecha: fecha ? fecha.substring(0, 10) : 'S/F',
       tipo: isNomina ? 'N' : tipo,
+      fechaHoraRaw: fecha || '',
+      hora: parsedHora,
+      isCancelada,
       subTotal,
       descuento,
       total,
@@ -1229,8 +1251,19 @@ export default function App() {
   const handleExportToExcel = () => {
     if (filteredFilesList.length === 0) return;
     
-    const excelRows = filteredFilesList.map(f => ({
+    // Sort all files chronologically by date and emission hour
+    const sortedFiles = [...filteredFilesList].sort((a, b) => {
+      const valA = a.fechaHoraRaw || a.fecha || '';
+      const valB = b.fechaHoraRaw || b.fecha || '';
+      return valA.localeCompare(valB);
+    });
+
+    // Exclude payroll invoices and cancelled invoices from the general audit worksheet
+    const generalFiles = sortedFiles.filter(f => !f.isNomina && f.tipo !== 'N' && !f.isCancelada);
+
+    const excelRows = generalFiles.map(f => ({
       'Fecha Emisión': f.fecha,
+      'Hora Emisión': f.hora || '00:00:00',
       'Archivo': f.fileName,
       'Serie': f.serie,
       'Folio': f.folio,
@@ -1262,13 +1295,14 @@ export default function App() {
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Auditoría General');
     
     // Add distinct high-fidelity sheet for Payroll (Nómina) break down
-    const payrollFiles = filteredFilesList.filter(f => f.isNomina || f.tipo === 'N');
+    const payrollFiles = sortedFiles.filter(f => f.isNomina || f.tipo === 'N');
     if (payrollFiles.length > 0) {
       const payrollRows = payrollFiles.map(f => ({
         'Archivo XML': f.fileName,
         'Serie': f.serie || 'S/S',
         'Folio': f.folio || 'S/F',
         'Fecha Pago': f.nominaFechaPago || f.fecha,
+        'Hora Emisión': f.hora || '00:00:00',
         'Periodo Inicial': f.nominaFechaInicialPago || '',
         'Periodo Final': f.nominaFechaFinalPago || '',
         'Días Pagados': f.nominaNumDiasPagados || 0,
@@ -1321,6 +1355,29 @@ export default function App() {
       
       const payrollWorksheet = XLSX.utils.json_to_sheet(payrollRows);
       XLSX.utils.book_append_sheet(workbook, payrollWorksheet, 'Desglose de Nóminas');
+    }
+
+    // Add optional high-fidelity sheet for Cancelled invoices if any exist
+    const cancelledFiles = sortedFiles.filter(f => f.isCancelada);
+    if (cancelledFiles.length > 0) {
+      const cancelledRows = cancelledFiles.map(f => ({
+        'Fecha Emisión': f.fecha,
+        'Hora Emisión': f.hora || '00:00:00',
+        'Archivo': f.fileName,
+        'Serie': f.serie,
+        'Folio': f.folio,
+        'Tipo CFDI': f.tipo === 'I' ? 'I - Ingreso (Cobros)' : f.tipo === 'E' ? 'E - Egreso (Gastos)' : f.tipo === 'N' ? 'N - Nómina (Sueldos)' : f.tipo === 'P' ? 'P - Pago' : 'Otros',
+        'RFC Emisor': f.emisorRfc,
+        'Razón Social Emisor': f.emisorNombre,
+        'RFC Receptor': f.receptorRfc,
+        'Razón Social Receptor': f.receptorNombre,
+        'Total Facturado ($)': f.total,
+        'Conceptos Principales': f.conceptos.join(' | '),
+        'Estado': 'MARCADA COMO CANCELADA / SIN VALOR OPERATIVO'
+      }));
+      
+      const cancelledWorksheet = XLSX.utils.json_to_sheet(cancelledRows);
+      XLSX.utils.book_append_sheet(workbook, cancelledWorksheet, 'Facturas Canceladas');
     }
     
     XLSX.writeFile(workbook, `Conciliacion_XML_ISBB_${new Date().toISOString().substring(0, 10)}.xlsx`);
@@ -2215,15 +2272,19 @@ export default function App() {
                             </td>
                             <td className="p-4">
                               <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider ${
-                                item.tipo === 'I' 
-                                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' 
-                                  : item.tipo === 'E' 
-                                    ? 'bg-amber-50 text-amber-700 border border-amber-100' 
-                                    : item.tipo === 'N'
-                                      ? 'bg-indigo-50 text-indigo-700 border border-indigo-100'
-                                      : 'bg-slate-150 text-slate-600 border border-slate-200'
+                                item.isCancelada
+                                  ? 'bg-rose-50 text-rose-700 border border-rose-100'
+                                  : item.tipo === 'I' 
+                                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' 
+                                    : item.tipo === 'E' 
+                                      ? 'bg-amber-50 text-amber-700 border border-amber-100' 
+                                      : item.tipo === 'N'
+                                        ? 'bg-indigo-50 text-indigo-700 border border-indigo-100'
+                                        : 'bg-slate-150 text-slate-600 border border-slate-200'
                               }`}>
-                                {item.tipo === 'I' ? 'Cobro (I)' : item.tipo === 'E' ? 'Gasto (E)' : item.tipo === 'N' ? 'Nómina (N)' : `Pago (${item.tipo})`}
+                                {item.isCancelada
+                                  ? 'Cancelada'
+                                  : item.tipo === 'I' ? 'Cobro (I)' : item.tipo === 'E' ? 'Gasto (E)' : item.tipo === 'N' ? 'Nómina (N)' : `Pago (${item.tipo})`}
                               </span>
                             </td>
                             <td className="p-4 font-bold text-slate-600 font-mono">{item.fecha}</td>
