@@ -2,7 +2,7 @@ import express, { Request, Response } from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import cors from 'cors';
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 
 // Initialize Gemini Client with User-Agent for safe telemetry and clean credentials
 const ai = new GoogleGenAI({
@@ -155,6 +155,103 @@ Por favor, elabora el reporte fiscal y de auditoría profesional para el contrib
     } catch (error: any) {
       console.error('Error conducting XML AI audits:', error);
       res.status(500).json({ error: error.message || 'Error interno de procesamiento de auditoría XML con IA' });
+    }
+  });
+
+  // API Route for PDF Bank Statement (Estado de Cuenta) analysis powered by Gemini
+  app.post('/api/analyze-pdf-statement', async (req: Request, res: Response) => {
+    try {
+      const { pdfBase64, fileName } = req.body;
+
+      if (!pdfBase64) {
+        return res.status(400).json({ error: 'Por favor cargue un archivo PDF de estado de cuenta válido.' });
+      }
+
+      if (!process.env.GEMINI_API_KEY) {
+        return res.status(500).json({ 
+          error: 'Servicio de Inteligencia Artificial de ISBB SOLUCIONES no configurado. Configure la clave API.' 
+        });
+      }
+
+      // Prepare parts for multimodal model invocation
+      const pdfPart = {
+        inlineData: {
+          mimeType: 'application/pdf',
+          data: pdfBase64
+        }
+      };
+
+      const systemInstruction = `Eres un Auditor y Contador de Conciliaciones Bancarias Senior en ISBB SOLUCIONES. Tu labor es analizar de forma exacta y minuciosa el estado de cuenta bancario de México proporcionado en formato PDF. 
+Extrae el nombre del banco, titular de la cuenta (persona física o empresa), número de cuenta, tarjeta o CLABE, período del estado de cuenta, saldo inicial, total de depósitos (abonos), total de retiros (cargos, comisiones), saldo final, tipo de moneda (MXN o USD), y el listado detallado de TODOS los movimientos individuales (transacciones).
+Asigna a cada movimiento una de las siguientes categorías contables lógicas correspondientes al mercado mexicano: 
+- 'Ventas / Cobros' (entradas de clientes, transferencias recibidas)
+- 'Servicios Básicos' (agua, luz, internet, telefonía)
+- 'Nómina y Sueldos' (pagos de salarios, IMSS)
+- 'Impuestos y Derechos' (pagos al SAT)
+- 'Gasolina y Transporte' (combustible, casetas)
+- 'Comisiones Bancarias' (cargos de comisiones, IVA de comisiones)
+- 'Retiro de Efectivo' (retiros en cajeros automáticos)
+- 'Arrendamiento' (pagos de renta)
+- 'Restaurante y Alimentos' (comidas, restaurantes, despensa)
+- 'Herramientas y Papelería' (papel, material de oficina, ferretería)
+- 'Inversiones y Financiamiento' (rendimientos, transferencias a inversión, pagos de préstamos)
+- 'Otros Gastos' (cualquier otro gasto general)
+
+Por favor sé consistente e identifica el tipo exacto de cada transacción como 'deposit' (para abonos, entradas, depósitos, intereses pagados) o 'withdrawal' (para cargos, salidas, retiros, comisiones).`;
+
+      const prompt = `Analiza por completo este documento PDF de estado de cuenta bancario "${fileName || 'Estado de Cuenta'}" y extrae todos los campos y movimientos bajo el formato de esquema estructurado JSON requerido. Por favor ten cuidado de que todos los valores monetarios sean numéricos absolutos (positivos) y el campo de tipo ("type") los distinga correctamente como 'deposit' o 'withdrawal'.`;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.5-flash',
+        contents: [pdfPart, { text: prompt }],
+        config: {
+          systemInstruction,
+          temperature: 0.1, // more deterministic for numerical precision
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              bankName: { type: Type.STRING, description: "Nombre del banco emisor del estado de cuenta (ej. BBVA, Banorte, Santander, HSBC, Banamex, etc.)" },
+              accountOwner: { type: Type.STRING, description: "Nombre completo del titular o empresa dueña de la cuenta" },
+              accountNumber: { type: Type.STRING, description: "Número de cuenta, CLABE, contrato o tarjeta que aparezca en el estado de cuenta" },
+              period: { type: Type.STRING, description: "Período o rango de fechas del estado de cuenta (ej. 'Mayo 2026', 'Del 01/05/2026 al 31/05/2026')" },
+              startingBalance: { type: Type.NUMBER, description: "Saldo inicial del período" },
+              totalDeposits: { type: Type.NUMBER, description: "Total de abonos / depósitos en el período" },
+              totalWithdrawals: { type: Type.NUMBER, description: "Total de cargos / cargos por retiro / compras en el período" },
+              endingBalance: { type: Type.NUMBER, description: "Saldo final del período" },
+              currency: { type: Type.STRING, description: "Moneda de la cuenta (ej. MXN, USD)" },
+              transactions: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    date: { type: Type.STRING, description: "Fecha del movimiento en formato YYYY-MM-DD o DD/MM/YYYY" },
+                    description: { type: Type.STRING, description: "Descripción completa o concepto de la transacción como aparece en el estado de cuenta" },
+                    reference: { type: Type.STRING, description: "Referencia, clave de rastreo, SPEI, número de cargo o de autorización. Si no existe, dejar como cadena vacía." },
+                    amount: { type: Type.NUMBER, description: "Monto absoluto de la transacción (positivo)" },
+                    type: { type: Type.STRING, description: "Tipo de movimiento contable. Debe ser estrictamente 'deposit' o 'withdrawal'" },
+                    category: { type: Type.STRING, description: "Clasificación o categoría contable lógica recomendada para este movimiento" }
+                  },
+                  required: ["date", "description", "amount", "type", "category"]
+                }
+              }
+            },
+            required: ["bankName", "accountOwner", "period", "startingBalance", "totalDeposits", "totalWithdrawals", "endingBalance", "currency", "transactions"]
+          }
+        }
+      });
+
+      const responseText = response.text;
+      if (!responseText) {
+        throw new Error('La IA no pudo procesar o devolver datos estructurados del estado de cuenta bancario.');
+      }
+
+      const parsedJSON = JSON.parse(responseText.trim());
+      res.json(parsedJSON);
+
+    } catch (error: any) {
+      console.error('Error analyzing Bank Statement PDF:', error);
+      res.status(500).json({ error: error.message || 'Error interno al decodificar y analizar el archivo PDF con IA.' });
     }
   });
 

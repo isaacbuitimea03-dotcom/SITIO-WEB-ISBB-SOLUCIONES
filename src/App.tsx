@@ -44,6 +44,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
 import AccountsManager from './components/AccountsManager';
+import BankStatementAnalyzer from './components/BankStatementAnalyzer';
 
 // Namespace and casing safe XML value extractor helpers
 const getAttrSafe = (el: Element | null, attrNames: string[]): string => {
@@ -78,6 +79,15 @@ const getElementsSafe = (parent: Document | Element, tags: string[]): Element[] 
     if (el.length > 0) return Array.from(el);
   }
   return [];
+};
+
+const isIvaTasaSpecial = (lbl: string): boolean => {
+  const norm = lbl.toLowerCase();
+  return (
+    norm.includes('iva') &&
+    !norm.includes('reten') &&
+    (norm.includes('16') || norm.includes('8') || norm.includes('0'))
+  );
 };
 
 // Lookup dictionaries for Mexican XML CFDI 4.0 Standard Codes
@@ -273,6 +283,7 @@ interface ParsedCFDI {
   fechaHoraRaw?: string;
   hora?: string;
   isCancelada?: boolean;
+  allTaxesMap?: Record<string, { base: number; importe: number; tasaStr: string; type: string }>;
 }
 
 // Interface for filter preset
@@ -384,8 +395,8 @@ export default function App() {
   const [showPassword, setShowPassword] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Active platform tab: 'dashboard' (analizador XML) or 'accounts' (administrador de cuentas)
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'accounts'>('dashboard');
+  // Active platform tab: 'dashboard' (analizador XML), 'accounts' (administrador de cuentas) or 'bank-statements' (analizador estado de cuenta)
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'accounts' | 'bank-statements'>('dashboard');
 
   // Load access users from database or fallback to defaults
   const [users, setUsers] = useState<AncofiUser[]>(() => {
@@ -649,7 +660,8 @@ export default function App() {
         const tipoFactor = getAttrSafe(t, ['TipoFactor', 'tipoFactor']);
         const tasaOCuotaStr = getAttrSafe(t, ['TasaOCuota', 'tasaOCuota']);
         const tasaOCuota = parseFloat(tasaOCuotaStr || '0');
-        const base = parseFloat(getAttrSafe(t, ['Base', 'base']) || '0');
+        // Fallback to concept's own subtotal Importe if the base is missing or 0
+        const base = parseFloat(getAttrSafe(t, ['Base', 'base']) || '0') || cpImporte;
         const importe = parseFloat(getAttrSafe(t, ['Importe', 'importe']) || '0');
         
         if (impuesto === '002' || impuesto === 'IVA') {
@@ -675,6 +687,7 @@ export default function App() {
       const conceptRetenciones = getElementsSafe(concepto, ['cfdi:Retencion', 'Retencion']);
       conceptRetenciones.forEach(r => {
         const impuesto = getAttrSafe(r, ['Impuesto', 'impuesto']);
+        const base = parseFloat(getAttrSafe(r, ['Base', 'base']) || '0') || cpImporte;
         const importe = parseFloat(getAttrSafe(r, ['Importe', 'importe']) || '0');
         if (impuesto === '001' || impuesto === 'ISR') {
           isrRetenido += importe;
@@ -689,6 +702,28 @@ export default function App() {
     // Fallback if concept taxes are empty (common in simplified invoices)
     if (tasa16Base === 0 && tasa0Base === 0 && impuestoExento === 0) {
       const traslados = getElementsSafe(xmlDoc, ['cfdi:Traslado', 'Traslado']);
+      
+      // Let's first pre-calculate the bases for non-zero rates so we can subtract them from subTotal if we encounter a 0% rate without a base!
+      let tempTasa16Base = 0;
+      let tempImpuestoExento = 0;
+      
+      traslados.forEach(t => {
+        const impuesto = getAttrSafe(t, ['Impuesto', 'impuesto']);
+        const tipoFactor = getAttrSafe(t, ['TipoFactor', 'tipoFactor']);
+        const tasaOCuotaStr = getAttrSafe(t, ['TasaOCuota', 'tasaOCuota']);
+        const tasaOCuota = parseFloat(tasaOCuotaStr || '0');
+        const base = parseFloat(getAttrSafe(t, ['Base', 'base']) || '0');
+        const importe = parseFloat(getAttrSafe(t, ['Importe', 'importe']) || '0');
+
+        if (impuesto === '002' || impuesto === 'IVA') {
+          if (tipoFactor === 'Exento') {
+            tempImpuestoExento += base;
+          } else if (tipoFactor === 'Tasa' && Math.abs(tasaOCuota - 0.16) < 0.01) {
+            tempTasa16Base += base || (importe / 0.16);
+          }
+        }
+      });
+
       traslados.forEach(t => {
         const impuesto = getAttrSafe(t, ['Impuesto', 'impuesto']);
         const tipoFactor = getAttrSafe(t, ['TipoFactor', 'tipoFactor']);
@@ -702,7 +737,15 @@ export default function App() {
             impuestoExento += base || subTotal;
           } else if (tipoFactor === 'Tasa') {
             if (tasaOCuota === 0) {
-              tasa0Base += base || subTotal;
+              if (base > 0) {
+                tasa0Base += base;
+              } else if (tempTasa16Base > 0 || tempImpuestoExento > 0) {
+                // Subtract other rates' bases from subTotal to get the 0% base dynamically and prevent taking the entire invoice total!
+                const calculated0Base = Math.max(0, subTotal - (tempTasa16Base + tempImpuestoExento));
+                tasa0Base += calculated0Base;
+              } else {
+                tasa0Base += subTotal;
+              }
             } else if (Math.abs(tasaOCuota - 0.16) < 0.01) {
               tasa16Base += base || (importe / 0.16);
               if (tipo === 'I') {
@@ -749,6 +792,284 @@ export default function App() {
         if (tasa16Base === 0) tasa16Base = totalIva / 0.16;
       }
     }
+
+    // --- DYNAMIC TAX ANALYZER ENGINE (HIGH FIDELITY BASE & IMPORTE COLLECTION) ---
+    const xmlTaxes: {
+      type: 'Traslado' | 'Retencion' | 'Local';
+      taxName: string;
+      base: number;
+      importe: number;
+      tasaStr: string;
+      label: string;
+    }[] = [];
+
+    const getTaxCodeName = (code: string): string => {
+      const c = code.trim();
+      if (c === '001' || c.toUpperCase() === 'ISR') return 'ISR';
+      if (c === '002' || c.toUpperCase() === 'IVA') return 'IVA';
+      if (c === '003' || c.toUpperCase() === 'IEPS') return 'IEPS';
+      return c;
+    };
+
+    let hasConceptTaxes = false;
+    conceptoElements.forEach(concepto => {
+      const cpImporte = parseFloat(getAttrSafe(concepto, ['Importe', 'importe']) || '0');
+      const cTraslados = getElementsSafe(concepto, ['cfdi:Traslado', 'Traslado']);
+      if (cTraslados.length > 0) hasConceptTaxes = true;
+      cTraslados.forEach(t => {
+        const impCode = getAttrSafe(t, ['Impuesto', 'impuesto']) || '002';
+        const impName = getTaxCodeName(impCode);
+        const tipoFactor = getAttrSafe(t, ['TipoFactor', 'tipoFactor']) || 'Tasa';
+        const tasaOCuotaStr = getAttrSafe(t, ['TasaOCuota', 'tasaOCuota']) || '0';
+        const tasaNum = parseFloat(tasaOCuotaStr);
+        // Fallback to concept's own subtotal Importe if the base is missing or 0
+        const base = parseFloat(getAttrSafe(t, ['Base', 'base']) || '0') || cpImporte;
+        const importe = parseFloat(getAttrSafe(t, ['Importe', 'importe']) || '0');
+
+        let label = '';
+        let tasaPct = '';
+        if (tipoFactor === 'Exento') {
+          label = `Traslado ${impName} Exento`;
+          tasaPct = 'Exento';
+        } else if (tipoFactor === 'Tasa') {
+          label = `Traslado ${impName} ${(tasaNum * 100).toFixed(2)}%`;
+          tasaPct = `${(tasaNum * 100).toFixed(2)}%`;
+        } else {
+          label = `Traslado ${impName} Cuota ${tasaNum}`;
+          tasaPct = `Cuota ${tasaNum}`;
+        }
+
+        xmlTaxes.push({
+          type: 'Traslado',
+          taxName: impName,
+          base,
+          importe,
+          tasaStr: tasaPct,
+          label
+        });
+      });
+
+      const cRetenciones = getElementsSafe(concepto, ['cfdi:Retencion', 'Retencion']);
+      if (cRetenciones.length > 0) hasConceptTaxes = true;
+      cRetenciones.forEach(r => {
+        const impCode = getAttrSafe(r, ['Impuesto', 'impuesto']) || '001';
+        const impName = getTaxCodeName(impCode);
+        const base = parseFloat(getAttrSafe(r, ['Base', 'base']) || '0') || cpImporte;
+        const importe = parseFloat(getAttrSafe(r, ['Importe', 'importe']) || '0');
+        const tasaOCuotaStr = getAttrSafe(r, ['TasaOCuota', 'tasaOCuota', 'tasaocuota']) || '';
+        
+        let label = '';
+        let tasaPct = '';
+        if (tasaOCuotaStr) {
+          const tNum = parseFloat(tasaOCuotaStr);
+          label = `Retención ${impName} ${(tNum * 100).toFixed(2)}%`;
+          tasaPct = `${(tNum * 100).toFixed(2)}%`;
+        } else {
+          label = `Retención ${impName}`;
+          tasaPct = 'Retenido';
+        }
+
+        xmlTaxes.push({
+          type: 'Retencion',
+          taxName: impName,
+          base,
+          importe,
+          tasaStr: tasaPct,
+          label
+        });
+      });
+    });
+
+    if (!hasConceptTaxes) {
+      const gTraslados = getElementsSafe(xmlDoc, ['cfdi:Traslado', 'Traslado']);
+      
+      // Let's first pre-calculate the bases for non-zero rates so we can subtract them from subTotal if we encounter a 0% rate without a base!
+      let tempTasa16Base = 0;
+      let tempTasa8Base = 0;
+      let tempImpuestoExento = 0;
+
+      gTraslados.forEach(t => {
+        let parentNode = t.parentNode;
+        let isConceptChild = false;
+        while (parentNode) {
+          if (parentNode.nodeName && parentNode.nodeName.toLowerCase().includes('concepto')) {
+            isConceptChild = true;
+            break;
+          }
+          parentNode = parentNode.parentNode;
+        }
+        if (isConceptChild) return;
+
+        const impCode = getAttrSafe(t, ['Impuesto', 'impuesto']) || '002';
+        const impName = getTaxCodeName(impCode);
+        const tipoFactor = getAttrSafe(t, ['TipoFactor', 'tipoFactor']) || 'Tasa';
+        const tasaOCuotaStr = getAttrSafe(t, ['TasaOCuota', 'tasaOCuota']) || '0';
+        const tasaNum = parseFloat(tasaOCuotaStr);
+        const base = parseFloat(getAttrSafe(t, ['Base', 'base']) || '0');
+        const importe = parseFloat(getAttrSafe(t, ['Importe', 'importe']) || '0');
+
+        if (impName === 'IVA') {
+          if (tipoFactor === 'Exento') {
+            tempImpuestoExento += base;
+          } else if (tipoFactor === 'Tasa') {
+            if (Math.abs(tasaNum - 0.16) < 0.01) {
+              tempTasa16Base += base || (importe / 0.16);
+            } else if (Math.abs(tasaNum - 0.08) < 0.01) {
+              tempTasa8Base += base || (importe / 0.08);
+            }
+          }
+        }
+      });
+
+      gTraslados.forEach(t => {
+        let parentNode = t.parentNode;
+        let isConceptChild = false;
+        while (parentNode) {
+          if (parentNode.nodeName && parentNode.nodeName.toLowerCase().includes('concepto')) {
+            isConceptChild = true;
+            break;
+          }
+          parentNode = parentNode.parentNode;
+        }
+        if (isConceptChild) return;
+
+        const impCode = getAttrSafe(t, ['Impuesto', 'impuesto']) || '002';
+        const impName = getTaxCodeName(impCode);
+        const tipoFactor = getAttrSafe(t, ['TipoFactor', 'tipoFactor']) || 'Tasa';
+        const tasaOCuotaStr = getAttrSafe(t, ['TasaOCuota', 'tasaOCuota']) || '0';
+        const tasaNum = parseFloat(tasaOCuotaStr);
+        const base = parseFloat(getAttrSafe(t, ['Base', 'base']) || '0');
+        const importe = parseFloat(getAttrSafe(t, ['Importe', 'importe']) || '0');
+
+        let label = '';
+        let tasaPct = '';
+        if (tipoFactor === 'Exento') {
+          label = `Traslado ${impName} Exento`;
+          tasaPct = 'Exento';
+        } else if (tipoFactor === 'Tasa') {
+          label = `Traslado ${impName} ${(tasaNum * 100).toFixed(2)}%`;
+          tasaPct = `${(tasaNum * 100).toFixed(2)}%`;
+        } else {
+          label = `Traslado ${impName} Cuota ${tasaNum}`;
+          tasaPct = `Cuota ${tasaNum}`;
+        }
+
+        let calculatedBase = base;
+        if (impName === 'IVA' && tipoFactor === 'Tasa' && tasaNum === 0) {
+          if (base > 0) {
+            calculatedBase = base;
+          } else if (tempTasa16Base > 0 || tempTasa8Base > 0 || tempImpuestoExento > 0) {
+            calculatedBase = Math.max(0, subTotal - (tempTasa16Base + tempTasa8Base + tempImpuestoExento));
+          } else {
+            calculatedBase = subTotal;
+          }
+        } else if (impName === 'IVA' && tipoFactor === 'Tasa' && Math.abs(tasaNum - 0.16) < 0.01) {
+          calculatedBase = base || (importe / 0.16);
+        } else if (impName === 'IVA' && tipoFactor === 'Tasa' && Math.abs(tasaNum - 0.08) < 0.01) {
+          calculatedBase = base || (importe / 0.08);
+        } else if (calculatedBase === 0) {
+          calculatedBase = subTotal;
+        }
+
+        xmlTaxes.push({
+          type: 'Traslado',
+          taxName: impName,
+          base: calculatedBase,
+          importe,
+          tasaStr: tasaPct,
+          label
+        });
+      });
+
+      const gRetenciones = getElementsSafe(xmlDoc, ['cfdi:Retencion', 'Retencion']);
+      gRetenciones.forEach(r => {
+        let parentNode = r.parentNode;
+        let isConceptChild = false;
+        while (parentNode) {
+          if (parentNode.nodeName && parentNode.nodeName.toLowerCase().includes('concepto')) {
+            isConceptChild = true;
+            break;
+          }
+          parentNode = parentNode.parentNode;
+        }
+        if (isConceptChild) return;
+
+        const impCode = getAttrSafe(r, ['Impuesto', 'impuesto']) || '001';
+        const impName = getTaxCodeName(impCode);
+        const base = parseFloat(getAttrSafe(r, ['Base', 'base']) || '0');
+        const importe = parseFloat(getAttrSafe(r, ['Importe', 'importe']) || '0');
+        const tasaOCuotaStr = getAttrSafe(r, ['TasaOCuota', 'tasaOCuota']) || '';
+
+        let label = '';
+        let tasaPct = '';
+        if (tasaOCuotaStr) {
+          const tNum = parseFloat(tasaOCuotaStr);
+          label = `Retención ${impName} ${(tNum * 100).toFixed(2)}%`;
+          tasaPct = `${(tNum * 100).toFixed(2)}%`;
+        } else {
+          label = `Retención ${impName}`;
+          tasaPct = 'Retenido';
+        }
+
+        xmlTaxes.push({
+          type: 'Retencion',
+          taxName: impName,
+          base: base || (importe > 0 && impName === 'ISR' ? (importe / 0.10) : 0),
+          importe,
+          tasaStr: tasaPct,
+          label
+        });
+      });
+    }
+
+    const localTasaLocales = getElementsSafe(xmlDoc, ['implocal:TrasladosLocales', 'TrasladosLocales']);
+    localTasaLocales.forEach(lt => {
+      const impLocName = getAttrSafe(lt, ['ImpLocTrasladado', 'impLocTrasladado']) || 'Impuesto Local Traslado';
+      const tasaTraslado = parseFloat(getAttrSafe(lt, ['TasadeTraslado', 'tasadeTraslado']) || '0');
+      const importe = parseFloat(getAttrSafe(lt, ['Importe', 'importe']) || '0');
+      
+      const label = `Traslado Local: ${impLocName} ${tasaTraslado.toFixed(2)}%`;
+      xmlTaxes.push({
+        type: 'Local',
+        taxName: impLocName,
+        base: subTotal,
+        importe,
+        tasaStr: `${tasaTraslado.toFixed(2)}%`,
+        label
+      });
+    });
+
+    const localRetLocales = getElementsSafe(xmlDoc, ['implocal:RetencionesLocales', 'RetencionesLocales']);
+    localRetLocales.forEach(lr => {
+      const impLocName = getAttrSafe(lr, ['ImpLocRetenido', 'impLocRetenido']) || 'Impuesto Local Retención';
+      const tasaRetencion = parseFloat(getAttrSafe(lr, ['TasadeRetencion', 'tasadeRetencion']) || '0');
+      const importe = parseFloat(getAttrSafe(lr, ['Importe', 'importe']) || '0');
+
+      const label = `Retención Local: ${impLocName} ${tasaRetencion.toFixed(2)}%`;
+      xmlTaxes.push({
+        type: 'Local',
+        taxName: impLocName,
+        base: subTotal,
+        importe,
+        tasaStr: `${tasaRetencion.toFixed(2)}%`,
+        label
+      });
+    });
+
+    const allTaxesMap: Record<string, { base: number; importe: number; tasaStr: string; type: string }> = {};
+    xmlTaxes.forEach(t => {
+      const normalizedLabel = t.label.trim();
+      if (!allTaxesMap[normalizedLabel]) {
+        allTaxesMap[normalizedLabel] = {
+          base: 0,
+          importe: 0,
+          tasaStr: t.tasaStr,
+          type: t.type
+        };
+      }
+      allTaxesMap[normalizedLabel].base += t.base;
+      allTaxesMap[normalizedLabel].importe += t.importe;
+    });
 
     // --- PAYROLL (NÓMINA) DETECTOR & PARSER (ISBB PREMIUM ENGINE) ---
     const nominaEl = getElementSafe(xmlDoc, ['nomina12:Nomina', 'Nomina', 'nomina11:Nomina', 'nomina:Nomina']);
@@ -1028,7 +1349,8 @@ export default function App() {
       deduccionImss,
       deduccionFondoAhorro,
       deduccionDescuentos,
-      deduccionOtros
+      deduccionOtros,
+      allTaxesMap
     };
   };
 
@@ -1261,34 +1583,58 @@ export default function App() {
     // Exclude payroll invoices and cancelled invoices from the general audit worksheet
     const generalFiles = sortedFiles.filter(f => !f.isNomina && f.tipo !== 'N' && !f.isCancelada);
 
-    const excelRows = generalFiles.map(f => ({
-      'Fecha Emisión': f.fecha,
-      'Hora Emisión': f.hora || '00:00:00',
-      'Archivo': f.fileName,
-      'Serie': f.serie,
-      'Folio': f.folio,
-      'Tipo CFDI': f.tipo === 'I' ? 'I - Ingreso (Cobros)' : f.tipo === 'E' ? 'E - Egreso (Gastos)' : f.tipo === 'N' ? 'N - Nómina (Sueldos)' : f.tipo === 'P' ? 'P - Pago' : 'Otros',
-      'RFC Emisor': f.emisorRfc,
-      'Razón Social Emisor': f.emisorNombre,
-      'RFC Receptor': f.receptorRfc,
-      'Razón Social Receptor': f.receptorNombre,
-      'Subtotal ($)': f.subTotal,
-      'Descuento ($)': f.descuento,
-      'Impuesto Exento ($)': f.impuestoExento,
-      'No Objeto a Impuesto ($)': f.noObjetoImpuesto,
-      'Tasa 0% ($)': f.tasa0Base,
-      'Tasa 16% ($)': f.tasa16Base,
-      'IVA ($)': f.tipo === 'I' ? f.ivaTrasladado : f.tipo === 'E' ? f.ivaAcreditable : 0,
-      'IEPS ($)': f.iepsTotal,
-      'Retención de IVA ($)': f.ivaRetenido,
-      'Retención de ISR ($)': f.isrRetenido,
-      'Uso CFDI (Clave)': f.usoCfdi || 'S/E',
-      'Uso CFDI (Nombre)': f.usoCfdiDesc || 'Sin especificar',
-      'Forma de Pago (Clave)': f.formaPago || 'S/E',
-      'Forma de Pago (Nombre)': f.formaPagoDesc || 'Sin especificar',
-      'Total Facturado ($)': f.total,
-      'Conceptos Principales': f.conceptos.join(' | ')
-    }));
+    // Collect all unique tax labels from all files to create columns for each detected tax dynamically!
+    const uniqueTaxLabelsSet = new Set<string>();
+    generalFiles.forEach(f => {
+      if (f.allTaxesMap) {
+        Object.keys(f.allTaxesMap).forEach(lbl => {
+          uniqueTaxLabelsSet.add(lbl);
+        });
+      }
+    });
+    const uniqueTaxLabels = Array.from(uniqueTaxLabelsSet).sort();
+
+    const excelRows = generalFiles.map(f => {
+      const row: Record<string, any> = {
+        'Fecha Emisión': f.fecha,
+        'Hora Emisión': f.hora || '00:00:00',
+        'Archivo': f.fileName,
+        'Serie': f.serie,
+        'Folio': f.folio,
+        'Tipo CFDI': f.tipo === 'I' ? 'I - Ingreso (Cobros)' : f.tipo === 'E' ? 'E - Egreso (Gastos)' : f.tipo === 'N' ? 'N - Nómina (Sueldos)' : f.tipo === 'P' ? 'P - Pago' : 'Otros',
+        'RFC Emisor': f.emisorRfc,
+        'Razón Social Emisor': f.emisorNombre,
+        'RFC Receptor': f.receptorRfc,
+        'Razón Social Receptor': f.receptorNombre,
+        'Subtotal ($)': f.subTotal,
+        'Descuento ($)': f.descuento,
+        'Impuesto Exento ($)': f.impuestoExento,
+        'No Objeto a Impuesto ($)': f.noObjetoImpuesto,
+        'Tasa 0% ($)': f.tasa0Base,
+        'Tasa 16% ($)': f.tasa16Base,
+        'IVA ($)': f.tipo === 'I' ? f.ivaTrasladado : f.tipo === 'E' ? f.ivaAcreditable : 0,
+        'IEPS ($)': f.iepsTotal,
+        'Retención de IVA ($)': f.ivaRetenido,
+        'Retención de ISR ($)': f.isrRetenido,
+        'Uso CFDI (Clave)': f.usoCfdi || 'S/E',
+        'Uso CFDI (Nombre)': f.usoCfdiDesc || 'Sin especificar',
+        'Forma de Pago (Clave)': f.formaPago || 'S/E',
+        'Forma de Pago (Nombre)': f.formaPagoDesc || 'Sin especificar',
+        'Total Facturado ($)': f.total,
+        'Conceptos Principales': f.conceptos.join(' | ')
+      };
+
+      // Add dynamic tax columns
+      uniqueTaxLabels.forEach(lbl => {
+        const taxDetail = f.allTaxesMap?.[lbl];
+        if (isIvaTasaSpecial(lbl)) {
+          row[`Base de ${lbl} ($)`] = taxDetail ? taxDetail.base : 0;
+        }
+        row[`Importe de ${lbl} ($)`] = taxDetail ? taxDetail.importe : 0;
+      });
+
+      return row;
+    });
     
     const workbook = XLSX.utils.book_new();
     const worksheet = XLSX.utils.json_to_sheet(excelRows);
@@ -1519,6 +1865,17 @@ export default function App() {
                 >
                   <FileText className="w-3.5 h-3.5" />
                   <span>Conciliador XML</span>
+                </button>
+                <button
+                  onClick={() => setActiveTab('bank-statements')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                    activeTab === 'bank-statements'
+                      ? 'bg-wheat text-slate-950 shadow-sm'
+                      : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5" />
+                  <span>Estado de Cuenta AI</span>
                 </button>
                 {currentUser?.email.toLowerCase() === 'demo@ancofi.com' && (
                   <button
@@ -2428,6 +2785,33 @@ export default function App() {
                             <span>TOTAL NETO:</span>
                             <span>${selectedFile.total.toFixed(2)} MXN</span>
                           </div>
+                           {selectedFile.allTaxesMap && Object.keys(selectedFile.allTaxesMap).length > 0 && (
+                            <div className="border-t border-slate-800 pt-2 col-span-2 space-y-1.5">
+                              <p className="text-[9px] text-amber-400 font-black uppercase tracking-wider">Análisis Detallado de Impuestos CFDI:</p>
+                              <div className="grid grid-cols-1 gap-1">
+                                {Object.entries(selectedFile.allTaxesMap).map(([taxLabel, rawDetails]) => {
+                                  const details = rawDetails as { base: number; importe: number; tasaStr: string; type: string };
+                                  const showBaseLine = isIvaTasaSpecial(taxLabel);
+                                  return (
+                                    <div key={taxLabel} className="bg-slate-950/40 p-2 rounded-lg border border-slate-800/80 flex flex-col gap-0.5 text-[9px]">
+                                      <div className="flex justify-between font-extrabold text-slate-100">
+                                        <span>{taxLabel}</span>
+                                        <span className="text-emerald-400">${details.importe.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                                      </div>
+                                      <div className="flex justify-between text-[8px] text-slate-400 font-mono">
+                                        {showBaseLine ? (
+                                          <span>Base Gravable: ${details.base.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                                        ) : (
+                                          <span />
+                                        )}
+                                        <span>Factor: {details.tasaStr}</span>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
                         </div>
                       </div>
 
@@ -2620,6 +3004,12 @@ export default function App() {
 
         </div>
       </main>
+            </>
+          ) : activeTab === 'bank-statements' ? (
+            <>
+              <main className="flex-1 max-w-7xl w-full mx-auto px-4 py-8 flex flex-col gap-12 animate-fade-in">
+                <BankStatementAnalyzer />
+              </main>
             </>
           ) : (
             <>
