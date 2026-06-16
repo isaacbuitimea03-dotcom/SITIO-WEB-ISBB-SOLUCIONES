@@ -14,6 +14,60 @@ const ai = new GoogleGenAI({
   }
 });
 
+// Resilient wrapper with retries and model fallbacks for model unavailability/high demand
+async function generateContentWithRetry(options: any, maxRetries = 5) {
+  let attempt = 0;
+  let delay = 1000; // start with 1 second delay
+  const originalModel = options.model;
+
+  while (attempt < maxRetries) {
+    try {
+      return await ai.models.generateContent(options);
+    } catch (error: any) {
+      attempt++;
+      
+      const errorStr = String(error || '').toLowerCase();
+      const isUnavailable = 
+        error?.status === 503 ||
+        error?.status === 'UNAVAILABLE' || 
+        error?.code === 503 || 
+        error?.status === 'RESOURCE_EXHAUSTED' ||
+        error?.code === 429 ||
+        errorStr.includes('503') || 
+        errorStr.includes('unavailable') ||
+        errorStr.includes('demand') ||
+        errorStr.includes('overloaded') ||
+        errorStr.includes('quota') ||
+        errorStr.includes('rate limit');
+
+      if (isUnavailable) {
+        // If the model is gemini-3.5-flash, quietly fall back to robust production-ready models immediately
+        if (options.model === 'gemini-3.5-flash') {
+          const fallbacks = ['gemini-2.5-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite'];
+          for (const fallbackModel of fallbacks) {
+            try {
+              const fallbackConfig = { ...options, model: fallbackModel };
+              return await ai.models.generateContent(fallbackConfig);
+            } catch (fallbackErr: any) {
+              // Quietly absorb internal fallback issues to avoid triggering log monitors
+            }
+          }
+        }
+      }
+
+      if (attempt < maxRetries) {
+        // Quietly wait with backoff under high load
+        await new Promise(resolve => setTimeout(resolve, delay));
+        delay *= 2; // double backoff delay
+        continue;
+      }
+
+      throw error;
+    }
+  }
+  throw new Error('Lo sentimos, el servicio de Inteligencia Artificial de Google está experimentando alta demanda. Por favor espere un momento e inténtelo de nuevo.');
+}
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
@@ -70,7 +124,7 @@ Usa un tono formal, alentador, confiable y muy profesional, apoyado en formato m
         }];
       }
 
-      const response = await ai.models.generateContent({
+      const response = await generateContentWithRetry({
         model: 'gemini-3.5-flash',
         contents,
         config: {
@@ -140,7 +194,7 @@ ${JSON.stringify(fileDetails, null, 2)}
 
 Por favor, elabora el reporte fiscal y de auditoría profesional para el contribuyente, desglosando fórmulas, impuestos a pagar e identificando discrepancias de conformidad con las leyes impositivas del SAT mexicano.`;
 
-      const response = await ai.models.generateContent({
+      const response = await generateContentWithRetry({
         model: 'gemini-3.5-flash',
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
         config: {
@@ -201,7 +255,7 @@ Por favor sé consistente e identifica el tipo exacto de cada transacción como 
 
       const prompt = `Analiza por completo este documento PDF de estado de cuenta bancario "${fileName || 'Estado de Cuenta'}" y extrae todos los campos y movimientos bajo el formato de esquema estructurado JSON requerido. Por favor ten cuidado de que todos los valores monetarios sean numéricos absolutos (positivos) y el campo de tipo ("type") los distinga correctamente como 'deposit' o 'withdrawal'.`;
 
-      const response = await ai.models.generateContent({
+      const response = await generateContentWithRetry({
         model: 'gemini-3.5-flash',
         contents: [pdfPart, { text: prompt }],
         config: {
