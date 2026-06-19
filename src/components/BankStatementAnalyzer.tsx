@@ -13,7 +13,13 @@ import {
   FileText, 
   HelpCircle, 
   RefreshCw, 
-  Maximize2 
+  Maximize2,
+  Settings,
+  Key,
+  Eye,
+  EyeOff,
+  Lock,
+  ExternalLink
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 
@@ -87,6 +93,145 @@ export default function BankStatementAnalyzer() {
   const [error, setError] = useState<string | null>(null);
   const [fileName, setFileName] = useState('');
   
+  // Custom API Key states for standalone/Vercel/GitHub Pages deployments
+  const [showKeyConfig, setShowKeyConfig] = useState(false);
+  const [savedApiKey, setSavedApiKey] = useState(() => localStorage.getItem('USER_GEMINI_API_KEY') || '');
+  const [inputApiKey, setInputApiKey] = useState(() => localStorage.getItem('USER_GEMINI_API_KEY') || '');
+  const [showPassword, setShowPassword] = useState(false);
+  const [apiKeySaveSuccess, setApiKeySaveSuccess] = useState(false);
+
+  // Helper to call Google Gemini API directly from the browser (bypasses server timeouts / static host restrictions)
+  const callGeminiDirectlyInBrowser = async (apiKey: string, base64Data: string, fName: string) => {
+    // We use gemini-1.5-flash as it is universally reliable for PDF inputs
+    const modelName = 'gemini-1.5-flash';
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+
+    const systemInstruction = `Eres un Auditor y Contador de Conciliaciones Bancarias Senior en ISBB SOLUCIONES. Tu labor es analizar de forma exacta y minuciosa el estado de cuenta bancario de México proporcionado en formato PDF. 
+Extrae el nombre del banco, titular de la cuenta (persona física o empresa), número de cuenta, tarjeta o CLABE, período del estado de cuenta, saldo inicial, total de depósitos (abonos), total de retiros (cargos, comisiones), saldo final, tipo de moneda (MXN o USD), y el listado detallado de TODOS los movimientos individuales (transacciones).
+Asigna a cada movimiento una de las siguientes categorías contables lógicas correspondientes al mercado mexicano: 
+- 'Ventas / Cobros' (entradas de clientes, transferencias recibidas)
+- 'Servicios Básicos' (agua, luz, internet, telefonía)
+- 'Nómina y Sueldos' (pagos de salarios, IMSS)
+- 'Impuestos y Derechos' (pagos al SAT)
+- 'Gasolina y Transporte' (combustible, casetas)
+- 'Comisiones Bancarias' (cargos de comisiones, IVA de comisiones)
+- 'Retiro de Efectivo' (retiros en cajeros automáticos)
+- 'Arrendamiento' (pagos de renta)
+- 'Restaurante y Alimentos' (comidas, restaurantes, despensa)
+- 'Herramientas y Papelería' (papel, material de oficina, ferretería)
+- 'Inversiones y Financiamiento' (rendimientos, transferencias a inversión, pagos de préstamos)
+- 'Otros Gastos' (cualquier otro gasto general)
+
+Por favor sé consistente e identifica el tipo exacto de cada transacción como 'deposit' (para abonos, entradas, depósitos, intereses pagados) o 'withdrawal' (para cargos, salidas, retiros, compras).`;
+
+    const promptText = `Analiza por completo este documento PDF de estado de cuenta bancario "${fName || 'Estado de Cuenta'}" y extrae todos los campos y movimientos bajo el formato de esquema estructurado JSON requerido. Por favor ten cuidado de que todos los valores monetarios sean numéricos absolutos (positivos) y el campo de tipo ("type") los distinga correctamente como 'deposit' o 'withdrawal'.`;
+
+    const payload = {
+      contents: [
+        {
+          parts: [
+            {
+              inlineData: {
+                mimeType: 'application/pdf',
+                data: base64Data
+              }
+            },
+            {
+              text: promptText
+            }
+          ]
+        }
+      ],
+      systemInstruction: {
+        parts: [
+          {
+            text: systemInstruction
+          }
+        ]
+      },
+      generationConfig: {
+        temperature: 0.1,
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: 'object',
+          properties: {
+            bankName: { type: 'string', description: "Nombre del banco emisor del estado de cuenta (ej. BBVA, Banorte, Santander, HSBC, Banamex, etc.)" },
+            accountOwner: { type: 'string', description: "Nombre completo del titular o empresa dueña de la cuenta" },
+            accountNumber: { type: 'string', description: "Número de cuenta, CLABE, contrato o tarjeta que aparezca en el estado de cuenta" },
+            period: { type: 'string', description: "Período o rango de fechas del estado de cuenta (ej. 'Mayo 2026', 'Del 01/05/2026 al 31/05/2026')" },
+            startingBalance: { type: 'number', description: "Saldo inicial del período" },
+            totalDeposits: { type: 'number', description: "Total de abonos / depósitos en el período" },
+            totalWithdrawals: { type: 'number', description: "Total de cargos / cargos por retiro / compras en el período" },
+            endingBalance: { type: 'number', description: "Saldo final del período" },
+            currency: { type: 'string', description: "Moneda de la cuenta (ej. MXN, USD)" },
+            transactions: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  date: { type: 'string', description: "Fecha del movimiento en formato YYYY-MM-DD o DD/MM/YYYY" },
+                  description: { type: 'string', description: "Descripción completa o concepto de la transacción como aparece en el estado de cuenta" },
+                  reference: { type: 'string', description: "Referencia, clave de rastreo, SPEI. Si no existe, dejar vacía." },
+                  amount: { type: 'number', description: "Monto absoluto de la transacción (positivo)" },
+                  type: { type: 'string', description: "Tipo de movimiento contable. Debe ser estrictamente 'deposit' o 'withdrawal'" },
+                  category: { type: 'string', description: "Clasificación o categoría contable lógica recomendada para este movimiento" }
+                },
+                required: ["date", "description", "amount", "type", "category"]
+              }
+            }
+          },
+          required: ["bankName", "accountOwner", "period", "startingBalance", "totalDeposits", "totalWithdrawals", "endingBalance", "currency", "transactions"]
+        }
+      }
+    };
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      let parsedErr;
+      try {
+        parsedErr = JSON.parse(errText);
+      } catch {
+        parsedErr = null;
+      }
+      const msg = parsedErr?.error?.message || errText || 'Error desconocido';
+      throw new Error(`Error en API local de Google Gemini: ${msg}`);
+    }
+
+    const resJson = await response.json();
+    const textOut = resJson?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!textOut) {
+      throw new Error('La API directa de Google Gemini no devolvió datos estructurados JSON legibles del PDF.');
+    }
+
+    return JSON.parse(textOut.trim());
+  };
+
+  const saveUserApiKey = (key: string) => {
+    const cleanKey = key.trim();
+    if (cleanKey) {
+      localStorage.setItem('USER_GEMINI_API_KEY', cleanKey);
+      setSavedApiKey(cleanKey);
+      setApiKeySaveSuccess(true);
+      setTimeout(() => setApiKeySaveSuccess(false), 3000);
+    } else {
+      removeUserApiKey();
+    }
+  };
+
+  const removeUserApiKey = () => {
+    localStorage.removeItem('USER_GEMINI_API_KEY');
+    setSavedApiKey('');
+    setInputApiKey('');
+  };
+
   // UI states
   const [searchTerm, setSearchTerm] = useState('');
   const [typeFilter, setTypeFilter] = useState<'all' | 'deposit' | 'withdrawal'>('all');
@@ -148,32 +293,42 @@ export default function BankStatementAnalyzer() {
           // Strip out the data:application/pdf;base64, prefix
           const base64Data = rawResult.split(',')[1];
           
-          const response = await fetch('/api/analyze-pdf-statement', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-              pdfBase64: base64Data,
-              fileName: file.name
-            })
-          });
+          let parsedData: StatementData;
+          const localKey = localStorage.getItem('USER_GEMINI_API_KEY');
 
-          const contentType = response.headers.get('content-type') || '';
-          if (!contentType.includes('application/json')) {
-            const tempText = await response.text();
-            console.error('Non-JSON response received:', tempText.substring(0, 300));
-            throw new Error(
-              'Error de comunicación con el motor de IA. Si estás alojando en Vercel/GitHub, asegúrate de: 1) Haber configurado la variable de entorno GEMINI_API_KEY en el Panel de Control de Vercel. 2) Considerar que la cuenta gratuita de Vercel (Hobby) interrumpe ejecuciones Serverless que superen los 10 segundos (frecuente con PDFs grandes). Para estados de cuenta pesados o pruebas óptimas, siempre puedes usar la URL de previsualización en vivo en AI Studio o el botón "Probar Demo con IA".'
-            );
+          if (localKey && localKey.trim() !== '') {
+            // Run processing 100% in-browser
+            parsedData = await callGeminiDirectlyInBrowser(localKey.trim(), base64Data, file.name);
+          } else {
+            // Call server-side proxy
+            const response = await fetch('/api/analyze-pdf-statement', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                pdfBase64: base64Data,
+                fileName: file.name
+              })
+            });
+
+            const contentType = response.headers.get('content-type') || '';
+            if (!contentType.includes('application/json')) {
+              const tempText = await response.text();
+              console.error('Non-JSON response received:', tempText.substring(0, 300));
+              throw new Error(
+                'Error de comunicación con el motor de IA. Si estás alojando en Vercel/GitHub, asegúrate de: 1) Haber configurado la variable de entorno GEMINI_API_KEY en el Panel de Control de Vercel. 2) Considerar que la cuenta gratuita de Vercel (Hobby) interrumpe ejecuciones Serverless que superen los 10 segundos (frecuente con PDFs grandes). Para estados de cuenta pesados o pruebas óptimas, puedes usar el botón "Configurar API Key" para ingresar una clave gratuita que corra 100% en tu navegador gratis.'
+              );
+            }
+
+            if (!response.ok) {
+              const errData = await response.json();
+              throw new Error(errData.error || 'No se pudo analizar el estado de cuenta.');
+            }
+
+            parsedData = await response.json();
           }
 
-          if (!response.ok) {
-            const errData = await response.json();
-            throw new Error(errData.error || 'No se pudo analizar el estado de cuenta.');
-          }
-
-          const parsedData: StatementData = await response.json();
           setStatement(parsedData);
           setLoading(false);
           clearInterval(animInterval);
@@ -414,6 +569,14 @@ export default function BankStatementAnalyzer() {
 
         <div className="flex flex-wrap items-center gap-2 z-10 self-start md:self-auto">
           <button
+            onClick={() => setShowKeyConfig(!showKeyConfig)}
+            className={`px-4 py-2 ${showKeyConfig ? 'bg-amber-500 text-slate-950 font-black' : 'bg-slate-800 hover:bg-slate-705 text-slate-200'} font-bold text-xs rounded-xl border border-slate-700 hover:border-slate-500/50 transition-all flex items-center justify-center gap-2 cursor-pointer`}
+          >
+            <Key className="w-3.5 h-3.5" />
+            <span>{savedApiKey ? '⚙️ API Key Activa' : '⚙️ Configurar API Key'}</span>
+          </button>
+
+          <button
             onClick={loadDemo}
             className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs rounded-xl border border-slate-700 hover:border-slate-500/50 transition-all flex items-center justify-center gap-2 cursor-pointer"
           >
@@ -433,6 +596,89 @@ export default function BankStatementAnalyzer() {
         </div>
         <div className="absolute top-0 right-0 -mr-24 -mt-24 w-80 h-80 bg-wheat/5 rounded-full blur-3xl pointer-events-none" />
       </div>
+
+      {showKeyConfig && (
+        <div className="bg-slate-900 border border-slate-850 rounded-3xl p-6 text-white space-y-4 shadow-xl animate-fade-in">
+          <div className="flex flex-col sm:flex-row items-start justify-between gap-4">
+            <div className="space-y-1">
+              <h4 className="font-extrabold text-sm text-amber-400 flex items-center gap-2">
+                <Settings className="w-4 h-4 text-amber-400 animate-spin-slow" /> Configuración para Despliegues Externos (Vercel / GitHub Pages)
+              </h4>
+              <p className="text-slate-350 text-xs leading-relaxed max-w-3xl">
+                Al hospedar en un servidor gratuito como Vercel, existen restricciones duras de tiempo (un límite de 10 segundos para cuentas Hobby), lo que interrumpe la lectura de PDFs pesados y emite fallos de respuesta JSON.
+                <br />
+                <span className="text-amber-300 font-bold">La mejor solución:</span> Configura tu propia clave Gemini API Key (es 100% gratuita). Las llamadas se realizarán sin pasar por ningún servidor intermediario, corriendo directamente en tu navegador y procesando documentos ilimitados de forma inmediata. Tu clave se almacena exclusivamente en tu navegador de forma segura (localStorage).
+              </p>
+            </div>
+            <a 
+              href="https://aistudio.google.com/" 
+              target="_blank" 
+              rel="noopener noreferrer"
+              className="px-3 py-2 bg-amber-500/10 hover:bg-amber-500/25 text-amber-300 rounded-xl text-[10px] font-black border border-amber-500/20 flex items-center gap-1.5 transition-all text-center flex-shrink-0"
+            >
+              <span>Obtener Key Gratis</span>
+              <ExternalLink className="w-3.5 h-3.5" />
+            </a>
+          </div>
+
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 bg-slate-950 p-4 rounded-2xl border border-white/5">
+            <div className="flex-1 relative">
+              <div className="absolute left-3.5 inset-y-0 flex items-center pointer-events-none">
+                <Lock className="w-4 h-4 text-slate-500" />
+              </div>
+              <input
+                type={showPassword ? "text" : "password"}
+                value={inputApiKey}
+                onChange={(e) => setInputApiKey(e.target.value)}
+                placeholder="Pega tu clave Gemini API Key aquí (AIzaSy...)"
+                className="w-full pl-10 pr-10 py-2.5 bg-slate-900 border border-slate-800 rounded-xl text-xs placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-amber-500 text-white font-mono"
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword(!showPassword)}
+                className="absolute right-3.5 inset-y-0 flex items-center text-slate-500 hover:text-slate-300"
+              >
+                {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => saveUserApiKey(inputApiKey)}
+                className="px-5 py-2.5 bg-amber-500 hover:bg-amber-450 text-slate-950 font-black text-xs rounded-xl transition-all flex items-center justify-center gap-1.5 flex-1 sm:flex-initial"
+              >
+                <span>Guardar</span>
+              </button>
+              {savedApiKey && (
+                <button
+                  onClick={removeUserApiKey}
+                  className="px-4 py-2.5 bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 font-bold text-xs rounded-xl border border-rose-500/20 transition-all text-center flex-1 sm:flex-initial"
+                >
+                  Eliminar
+                </button>
+              )}
+            </div>
+          </div>
+
+          {apiKeySaveSuccess && (
+            <p className="text-emerald-400 text-[11px] font-bold animate-pulse flex items-center gap-1">
+              <CheckCircle2 className="w-3.5 h-3.5" /> Clave configurada exitosamente. El sistema ahora opera en ejecución local in-browser de alta velocidad.
+            </p>
+          )}
+
+          <div className="flex items-center gap-2 text-[10px] text-slate-500 font-mono">
+            <span>MODO DE CONEXIÓN ACTIVO:</span>
+            {savedApiKey ? (
+              <span className="text-emerald-400 font-bold bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
+                🟢 CLIENT-SIDE DIRECTO (ALTA VELOCIDAD Y SIN LÍMITES)
+              </span>
+            ) : (
+              <span className="text-blue-400 font-bold bg-blue-500/10 px-2 py-0.5 rounded-full border border-blue-500/20">
+                🔵 PROXY DE SERVIDOR (LÍMITE DE 10S EN VERCEL)
+              </span>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Main Body content conditional */}
       {!statement && !loading ? (

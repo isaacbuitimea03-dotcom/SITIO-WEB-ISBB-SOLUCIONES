@@ -1806,33 +1806,128 @@ export default function App() {
     };
 
     try {
-      const response = await fetch('/api/analyze-xml-ai', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          xmlSummary: xmlTotals,
-          fileDetails: structuredDetails.slice(0, 35),
-          regimen: labelRegimenMap[xmlRegimen] || xmlRegimen
-        })
-      });
+      const localKey = localStorage.getItem('USER_GEMINI_API_KEY');
 
-      const contentType = response.headers.get('content-type') || '';
-      if (!contentType.includes('application/json')) {
-        const tempText = await response.text();
-        console.error('Non-JSON response received:', tempText.substring(0, 300));
-        throw new Error(
-          'Error de comunicación con el motor de auditoría SAT. Si estás alojando en Vercel, asegúrate de: 1) Haber configurado la variable de entorno GEMINI_API_KEY en tu panel de control de Vercel. 2) Recordar que Vercel interrumpe cualquier ejecución Serverless que tome más de 10 segundos en cuentas gratuitas. Para probar fluidamente, siempre puedes usar la versión de previsualización en vivo en el entorno Cloud Run de AI Studio.'
-        );
+      if (localKey && localKey.trim() !== '') {
+        // Run fully local, client-side, avoiding Vercel server timeouts or lack of static backend
+        const modelName = 'gemini-1.5-flash';
+        const apiKey = localKey.trim();
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+
+        const regimenVal = labelRegimenMap[xmlRegimen] || xmlRegimen;
+
+        const systemInstruction = `Eres un Auditor Fiscal Senior de ISBB SOLUCIONES, experto oficial en la fiscalización de CFDI (Comprobante Fiscal Digital por Internet) en México bajo los lineamientos vigentes del SAT (incluyendo la versión CFDI 4.0, complementos de pago y normativas de deducciones).
+
+Tu labor es analizar un lote de archivos CFDI XML que el contribuyente ha cargado, evaluar las cifras acumuladas de Ingresos (Comprobantes tipo "I" de Ingreso) y Egresos (Comprobantes tipo "E" o gastos/deducciones), calcular los impuestos principales aplicables (ISR e IVA) según el Régimen Fiscal que seleccione el usuario, y proveer un reporte de auditoría altamente técnico, formal, preciso y accionable.
+
+Por favor, estructura siempre tu respuesta con formato Markdown de alta calidad estética:
+1. Resumen de la Auditoría XML (con métricas clave o tablas de lo detectado).
+2. Conciliación de Impuestos Realizada:
+   - Base de Ingresos Declarada (CFDI Ingreso).
+   - Base de Deducciones Autorizadas (CFDI Gasto) y análisis de deducibilidad.
+   - Cálculo de Impuesto al Valor Agregado (IVA Trasladado 16% vs IVA Acreditable 16%, retenciones y saldo neto a pagar o saldo a favor).
+   - Estimación Proporcional de ISR mensual acumulado y retenciones (ej. aplicando tasas de RESICO de 1% a 2.5%, o tabla de Personas Físicas / Personas Morales según corresponda).
+3. Semáforo de Riesgo SAT y Cumplimiento:
+   - Diagnóstico de UUIDs repetidos, emisores en lista negra (EFOS/EDOS) - simulación de advertencia si corresponde.
+   - Errores de retención de impuestos (por ejemplo, si una Persona Física RESICO le factura a una Persona Moral y omitió aplicar la retención del 1.25% de ISR, o si falta el desglose de IVA retenido de las 2/3 partes).
+4. Acciones y Estrategias Fiscales de Optimización:
+   - Consejos directos de deducciones permitidas para mejorar la situación fiscal del contribuyente legalmente.
+   - Pasos para garantizar la correcta conciliación de sus XMLs contra los estados de cuenta bancarios.
+
+Usa un tono rigurosamente formal, ejecutivo, alentador y confiable.`;
+
+        const promptText = `Por favor, realiza una auditoría y cálculo de impuestos para el siguiente lote de archivos CFDI XML analizados:
+
+--- RÉGIMEN FISCAL DEL CONTRIBUYENTE ---
+${regimenVal}
+
+--- RESUMEN DE LOS CFDI DETECTADOS ---
+- Total de Archivos Cargados: ${xmlTotals.totalFiles}
+- CFDI de Ingreso (I) cantidad: ${xmlTotals.ingresosCount} ($${xmlTotals.ingresosTotal.toFixed(2)} MXN)
+- CFDI de Egreso/Gasto (E) cantidad: ${xmlTotals.egresosCount} ($${xmlTotals.egresosTotal.toFixed(2)} MXN)
+- Total de IVA Trasladado (por ventas): $${xmlTotals.ivaTrasladadoTotal.toFixed(2)} MXN
+- Total de IVA Acreditable (por gastos): $${xmlTotals.ivaAcreditableTotal.toFixed(2)} MXN
+- Total de IVA Retenido (por el emisor o por receptor): $${xmlTotals.ivaRetenidoTotal.toFixed(2)} MXN
+- Total de ISR Retenido: $${xmlTotals.isrRetenidoTotal.toFixed(2)} MXN
+- Subtotal Acumulado Neto: $${xmlTotals.subTotalAcumulado.toFixed(2)} MXN
+- Total Acumulado Bruto (Subtotal + IVA - Retenciones): $${xmlTotals.totalAcumulado.toFixed(2)} MXN
+
+--- DETALLES INDIVIDUALES DE FACTURAS XML ---
+${JSON.stringify(structuredDetails.slice(0, 35), null, 2)}
+
+Por favor, elabora el reporte fiscal y de auditoría profesional para el contribuyente, desglosando fórmulas, impuestos a pagar e identificando discrepancias de conformidad con las leyes impositivas del SAT mexicano.`;
+
+        const payload = {
+          contents: [
+            {
+              parts: [{ text: promptText }]
+            }
+          ],
+          systemInstruction: {
+            parts: [{ text: systemInstruction }]
+          },
+          generationConfig: {
+            temperature: 0.25
+          }
+        };
+
+        const directResponse = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(payload)
+        });
+
+        if (!directResponse.ok) {
+          const rawErr = await directResponse.text();
+          let errJson;
+          try {
+            errJson = JSON.parse(rawErr);
+          } catch {
+            errJson = null;
+          }
+          const msg = errJson?.error?.message || rawErr || 'Error desconocido';
+          throw new Error(`Google Gemini direct API error: ${msg}`);
+        }
+
+        const directJson = await directResponse.json();
+        const auditText = directJson?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!auditText) {
+          throw new Error('La API local de Gemini no devolvió un diagnóstico de texto válido.');
+        }
+
+        setAuditResult(auditText);
+      } else {
+        // Standard Node backend proxy call
+        const response = await fetch('/api/analyze-xml-ai', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            xmlSummary: xmlTotals,
+            fileDetails: structuredDetails.slice(0, 35),
+            regimen: labelRegimenMap[xmlRegimen] || xmlRegimen
+          })
+        });
+
+        const contentType = response.headers.get('content-type') || '';
+        if (!contentType.includes('application/json')) {
+          const tempText = await response.text();
+          console.error('Non-JSON response received:', tempText.substring(0, 300));
+          throw new Error(
+            'Error de comunicación con el motor de auditoría SAT. Si estás alojando en Vercel, asegúrate de: 1) Haber configurado la variable de entorno GEMINI_API_KEY en tu panel de control de Vercel. 2) Recordar que Vercel interrumpe cualquier ejecución Serverless que tome más de 10 segundos en cuentas gratuitas. Para evitar límites o caídas por completo en servidores compartidos, puedes usar el botón de "Configurar API Key" en la pestaña de Estado de Cuenta e ingresar tu propia clave gratuita de Gemini para que todo se procese directamente en tu navegador.'
+          );
+        }
+
+        if (!response.ok) {
+          throw new Error('El servidor de Inteligencia Artificial SAT no respondió a tiempo.');
+        }
+
+        const data = await response.json();
+        setAuditResult(data.result);
       }
-
-      if (!response.ok) {
-        throw new Error('El servidor de Inteligencia Artificial SAT no respondió a tiempo.');
-      }
-
-      const data = await response.json();
-      setAuditResult(data.result);
     } catch (error: any) {
       console.error('AI XML audit error:', error);
       setAuditResult(`⚠️ Error: ${error.message || 'La auditoría con Inteligencia Artificial no pudo procesarse.'}`);
