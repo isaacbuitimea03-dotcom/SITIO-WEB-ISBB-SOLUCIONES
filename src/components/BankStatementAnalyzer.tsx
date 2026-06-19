@@ -159,6 +159,15 @@ export default function BankStatementAnalyzer() {
             })
           });
 
+          const contentType = response.headers.get('content-type') || '';
+          if (!contentType.includes('application/json')) {
+            const tempText = await response.text();
+            console.error('Non-JSON response received:', tempText.substring(0, 300));
+            throw new Error(
+              'El servidor de Inteligencia Artificial no devolvió un formato válido JSON. Al estar alojado en una plataforma estática (como Vercel o GitHub Pages), el backend en Node (server.ts) no se ejecuta de forma automática. Por favor use el botón "Probar Demo con IA" o use el entorno Cloud Run provisto en AI Studio.'
+            );
+          }
+
           if (!response.ok) {
             const errData = await response.json();
             throw new Error(errData.error || 'No se pudo analizar el estado de cuenta.');

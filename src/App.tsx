@@ -1818,6 +1818,15 @@ export default function App() {
         })
       });
 
+      const contentType = response.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        const tempText = await response.text();
+        console.error('Non-JSON response received:', tempText.substring(0, 300));
+        throw new Error(
+          'El servidor de auditoría SAT no devolvió un formato válido JSON. Al estar alojado en una plataforma de despliegue estático (como Vercel o GitHub Pages), el motor de base de datos y backend Node (server.ts) no se ejecuta activamente de manera predeterminada. Acceda a la versión de vista previa en vivo provista por AI Studio para probar toda la computación server-side de Inteligencia Artificial.'
+        );
+      }
+
       if (!response.ok) {
         throw new Error('El servidor de Inteligencia Artificial SAT no respondió a tiempo.');
       }
