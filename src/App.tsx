@@ -1823,7 +1823,7 @@ export default function App() {
         const tempText = await response.text();
         console.error('Non-JSON response received:', tempText.substring(0, 300));
         throw new Error(
-          'El servidor de auditoría SAT no devolvió un formato válido JSON. Al estar alojado en una plataforma de despliegue estático (como Vercel o GitHub Pages), el motor de base de datos y backend Node (server.ts) no se ejecuta activamente de manera predeterminada. Acceda a la versión de vista previa en vivo provista por AI Studio para probar toda la computación server-side de Inteligencia Artificial.'
+          'Error de comunicación con el motor de auditoría SAT. Si estás alojando en Vercel, asegúrate de: 1) Haber configurado la variable de entorno GEMINI_API_KEY en tu panel de control de Vercel. 2) Recordar que Vercel interrumpe cualquier ejecución Serverless que tome más de 10 segundos en cuentas gratuitas. Para probar fluidamente, siempre puedes usar la versión de previsualización en vivo en el entorno Cloud Run de AI Studio.'
         );
       }
 

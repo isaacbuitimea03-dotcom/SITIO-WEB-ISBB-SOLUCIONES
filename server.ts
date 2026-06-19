@@ -1,6 +1,5 @@
 import express, { Request, Response } from 'express';
 import path from 'path';
-import { createServer as createViteServer } from 'vite';
 import cors from 'cors';
 import { GoogleGenAI, Type } from "@google/genai";
 
@@ -310,7 +309,8 @@ Por favor sé consistente e identifica el tipo exacto de cada transacción como 
   // Vite middleware for development
   async function startServer() {
     const PORT = 3000;
-    if (process.env.NODE_ENV !== 'production') {
+    if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
+      const { createServer: createViteServer } = await import('vite');
       const vite = await createViteServer({
         server: { middlewareMode: true },
         appType: 'spa',

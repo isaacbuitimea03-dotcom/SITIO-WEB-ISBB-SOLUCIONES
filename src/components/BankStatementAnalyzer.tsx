@@ -164,7 +164,7 @@ export default function BankStatementAnalyzer() {
             const tempText = await response.text();
             console.error('Non-JSON response received:', tempText.substring(0, 300));
             throw new Error(
-              'El servidor de Inteligencia Artificial no devolvió un formato válido JSON. Al estar alojado en una plataforma estática (como Vercel o GitHub Pages), el backend en Node (server.ts) no se ejecuta de forma automática. Por favor use el botón "Probar Demo con IA" o use el entorno Cloud Run provisto en AI Studio.'
+              'Error de comunicación con el motor de IA. Si estás alojando en Vercel/GitHub, asegúrate de: 1) Haber configurado la variable de entorno GEMINI_API_KEY en el Panel de Control de Vercel. 2) Considerar que la cuenta gratuita de Vercel (Hobby) interrumpe ejecuciones Serverless que superen los 10 segundos (frecuente con PDFs grandes). Para estados de cuenta pesados o pruebas óptimas, siempre puedes usar la URL de previsualización en vivo en AI Studio o el botón "Probar Demo con IA".'
             );
           }
 
