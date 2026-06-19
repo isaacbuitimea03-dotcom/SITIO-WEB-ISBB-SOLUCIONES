@@ -83,6 +83,7 @@ export default function BankStatementAnalyzer() {
   const [statement, setStatement] = useState<StatementData | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingPhase, setLoadingPhase] = useState('');
+  const [loadingProgress, setLoadingProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [fileName, setFileName] = useState('');
   
@@ -93,7 +94,7 @@ export default function BankStatementAnalyzer() {
   
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Reassuring loading step simulator
+  // Reassuring loading step simulator with dynamic progress tracking
   const startLoadingAnimation = () => {
     const phases = [
       'Iniciando lectura binarizada del Estado de Cuenta PDF...',
@@ -102,16 +103,24 @@ export default function BankStatementAnalyzer() {
       'Clasificando movimientos de forma lógica en la legislación SAT...',
       'Validando cuadre e integridad de saldos bancarios...'
     ];
-    let i = 0;
+    setLoadingProgress(5);
     setLoadingPhase(phases[0]);
+
+    const startTime = Date.now();
+    const duration = 16000; // 16 seconds simulation target
+
     const interval = setInterval(() => {
-      i++;
-      if (i < phases.length) {
-        setLoadingPhase(phases[i]);
-      } else {
-        clearInterval(interval);
-      }
-    }, 2800);
+      const elapsed = Date.now() - startTime;
+      const calculatedProgress = Math.min(98, Math.floor((elapsed / duration) * 93) + 5);
+      setLoadingProgress(calculatedProgress);
+
+      const phaseIdx = Math.min(
+        Math.floor((elapsed / duration) * phases.length),
+        phases.length - 1
+      );
+      setLoadingPhase(phases[phaseIdx]);
+    }, 100);
+
     return interval;
   };
 
@@ -187,12 +196,24 @@ export default function BankStatementAnalyzer() {
     setFileName('Estado_de_Cuenta_DEMO_ISBB.pdf');
     setError(null);
     setLoading(true);
+    setLoadingProgress(5);
     setLoadingPhase('Cargando plantilla de demostración de ISBB Soluciones...');
     
+    const startTime = Date.now();
+    const duration = 1600; // 1.6s
+
+    const demoInterval = setInterval(() => {
+      const elapsed = Date.now() - startTime;
+      const calculatedProgress = Math.min(100, Math.floor((elapsed / duration) * 95) + 5);
+      setLoadingProgress(calculatedProgress);
+    }, 50);
+
     setTimeout(() => {
+      clearInterval(demoInterval);
+      setLoadingProgress(100);
       setStatement(DEMO_STATEMENT);
       setLoading(false);
-    }, 1500);
+    }, 1600);
   };
 
   const clearData = () => {
@@ -202,6 +223,7 @@ export default function BankStatementAnalyzer() {
     setSearchTerm('');
     setTypeFilter('all');
     setCategoryFilter('all');
+    setLoadingProgress(0);
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -453,18 +475,41 @@ export default function BankStatementAnalyzer() {
 
       {/* Loading Screen with reassuring stages */}
       {loading && (
-        <div className="bg-slate-950/80 backdrop-blur-md rounded-3xl border border-slate-800 p-10 flex flex-col items-center justify-center text-center gap-6 py-20 text-white animate-fade-in">
-          <div className="relative">
-            <div className="w-16 h-16 rounded-full border-4 border-amber-400/20 border-t-amber-400 animate-spin" />
+        <div className="bg-slate-950/85 backdrop-blur-md rounded-3xl border border-slate-800 p-8 flex flex-col items-center justify-center text-center gap-6 py-20 text-white animate-fade-in relative overflow-hidden">
+          {/* Decorative ambient background glows */}
+          <div className="absolute top-0 left-1/4 w-40 h-40 bg-amber-500/10 rounded-full blur-3xl pointer-events-none" />
+          <div className="absolute bottom-0 right-1/4 w-40 h-40 bg-orange-500/10 rounded-full blur-3xl pointer-events-none" />
+
+          <div className="relative z-10">
+            <div className="w-16 h-16 rounded-full border-4 border-amber-500/10 border-t-amber-500 animate-spin" />
             <Sparkles className="w-6 h-6 text-amber-300 absolute inset-0 m-auto animate-pulse" />
           </div>
           
-          <div className="space-y-2 max-w-md">
-            <h3 className="font-extrabold text-md tracking-tight">Procesando Consulta de Auditoria Bancaria...</h3>
-            <p className="text-slate-400 text-xs font-mono select-none px-4 py-1.5 bg-slate-900 rounded-lg inline-block border border-white/5 animate-pulse">
+          <div className="space-y-5 max-w-md w-full flex flex-col items-center z-10">
+            <div>
+              <h3 className="font-extrabold text-lg text-slate-100 tracking-tight">Procesando Consulta de Auditoria Bancaria...</h3>
+              <p className="text-[11px] text-slate-400 font-medium">Análisis inteligente con tecnología multimodal</p>
+            </div>
+
+            {/* Gradient Progress Bar */}
+            <div className="w-full max-w-sm space-y-2">
+              <div className="flex justify-between items-center text-[10px] font-mono px-1">
+                <span className="font-bold uppercase tracking-wider text-slate-500">PROGRESO DEL ESCANEO</span>
+                <span className="text-amber-400 font-black text-xs">{loadingProgress}%</span>
+              </div>
+              <div className="w-full bg-slate-900 border border-slate-800/80 rounded-full h-4 overflow-hidden p-0.5 shadow-inner">
+                <div 
+                  className="h-full bg-gradient-to-r from-amber-500 via-orange-500 to-yellow-400 rounded-full transition-all duration-300 ease-out shadow-[0_0_12px_rgba(245,158,11,0.45)] relative"
+                  style={{ width: `${loadingProgress}%` }}
+                />
+              </div>
+            </div>
+
+            <p className="text-slate-200 text-xs font-mono select-none px-4 py-2 bg-slate-900/90 rounded-xl inline-block border border-white/5 max-w-full text-center shadow-md animate-pulse">
               {loadingPhase}
             </p>
-            <p className="text-[10px] text-slate-500 max-w-sm mt-3 leading-relaxed">
+            
+            <p className="text-[10px] text-slate-500 max-w-xs leading-relaxed">
               Nota: El motor Gemini de ISBB analiza el PDF de forma inteligente. Esta operación puede demorar de 10 a 20 segundos dependiendo del volumen y páginas del estado de cuenta.
             </p>
           </div>
