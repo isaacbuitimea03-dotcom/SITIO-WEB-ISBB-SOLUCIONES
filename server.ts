@@ -1,7 +1,10 @@
 import express, { Request, Response } from 'express';
 import path from 'path';
 import cors from 'cors';
+import multer from 'multer';
 import { GoogleGenAI, Type } from "@google/genai";
+
+const upload = multer({ storage: multer.memoryStorage() });
 
 // Initialize Gemini Client with User-Agent for safe telemetry and clean credentials
 const ai = new GoogleGenAI({
@@ -303,6 +306,469 @@ Por favor sé consistente e identifica el tipo exacto de cada transacción como 
     } catch (error: any) {
       console.error('Error analyzing Bank Statement PDF:', error);
       res.status(500).json({ error: error.message || 'Error interno al decodificar y analizar el archivo PDF con IA.' });
+    }
+  });
+
+  // --- SAT-GO WEB SERVICE PROXY ---
+  const SAT_GO_FIXED_TOKEN = "Bearer eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDIyMkFBQSIsImtpZCI6Imluc18zQldabzhxMjR6S2pVdlVWc2pzcHppb012bUsiLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwczovL3dlYi5zYXQtZ28uY29tIiwiZW1haWwiOiJpc2FhY2J1aXRpbWVhMDNAZ21haWwuY29tIiwiZXhwIjoxNzg0ODU1NzEyLCJpYXQiOjE3ODQyNTA3MTIsImlzcyI6Imh0dHBzOi8vY2xlcmsucHJlcHJvZC5zYXQtZ28uY29tIiwianRpIjoiYWIyMDQ1YjY0NmRhZWJlZDllZmUiLCJuYmYiOjE3ODQyNTA3MDcsInJvbGUiOm51bGwsInN1YiI6InVzZXJfM0RuRHYxUWptbk1XNGhHSmVUdnd6VGowN0hoIiwidXNlclV1aWQiOiJ1c2VyXzNEbkR2MVFqbW5NVzRoR0plVHZ3elRqMDdIaCIsInVzZXJuYW1lIjpudWxsfQ.glSl4l8gfNDOWD_N53PHqVyOebFjVk3-rSlmUbsRWocMMAMsgikaKW3yHeA8W56Alyq-bXZTuQJgtYd96OVH0XpyFpjm0qZj3uCK_rD1Xb0K4HI0fokL3A_7-s1ia3ADvXmIn3KQjwwcFXUwfTR--FH49rVdhVxb12S4dhMJk9ugQZtAO3Yn-h4Rwh2h8n1yj9-SSCYjWgpUz9EpdG_7a79dUq4JPjErO8KNZY_oH4d4toUBOmNHvFvY9JOYFjIm5DuT-CFRW5p7GPeTwqJELi562yhMRBSQYGZaSIZ826Jshoborl9eTsYbRt484pCk_RQdHRj0ZZWmjm4z3pH7uQ";
+  let cachedKeyValue: string | null = null;
+
+  async function getSatGoKeyValue(): Promise<string> {
+    return SAT_GO_FIXED_TOKEN;
+  }
+
+  function getSatGoErrorMessage(status: number, text: string, defaultMsg: string): string {
+    if (text && text.trim()) {
+      try {
+        // Try to see if it's a JSON error with a message property
+        const parsed = JSON.parse(text);
+        return parsed.message || parsed.error || parsed.Message || text;
+      } catch (e) {
+        return text;
+      }
+    }
+    if (status === 401) {
+      return 'Credenciales de SAT incorrectas o token no autorizado. Por favor verifique su RFC, contraseña CIEC o archivos de la FIEL.';
+    }
+    if (status === 400) {
+      return 'Solicitud incorrecta. Verifique que todos los datos y archivos ingresados sean correctos.';
+    }
+    if (status === 403) {
+      return 'Acceso prohibido. El servicio de SAT-GO no tiene autorización para realizar esta consulta o la suscripción ha expirado.';
+    }
+    if (status === 404) {
+      return 'El recurso solicitado no existe en los servidores de SAT-GO.';
+    }
+    if (status >= 500) {
+      return 'El servicio de SAT-GO o el portal de consultas del SAT está experimentando problemas temporales de conexión. Por favor intente de nuevo más tarde.';
+    }
+    return defaultMsg;
+  }
+
+  // 1. Create Key
+  app.post('/api/sat-go/create-key', async (req: Request, res: Response) => {
+    try {
+      const keyValue = await getSatGoKeyValue();
+      res.json({ keyValue });
+    } catch (error: any) {
+      console.error('Error in SAT-GO CreateKey proxy:', error);
+      res.status(500).json({ error: error.message || 'Error interno al comunicarse con SAT-GO.' });
+    }
+  });
+
+  // 2. Consultar Facturas con FIEL (POST multipart/form-data)
+  app.post('/api/sat-go/consultar-facfiel', upload.fields([
+    { name: 'llavePrivada', maxCount: 1 },
+    { name: 'Certificado', maxCount: 1 }
+  ]), async (req: Request, res: Response) => {
+    try {
+      const rfc = req.headers['rfc'];
+      if (!rfc) {
+        return res.status(400).json({ error: 'El RFC es requerido.' });
+      }
+
+      const authHeader = await getSatGoKeyValue();
+
+      const filesMap = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
+      const keyFile = filesMap?.['llavePrivada']?.[0];
+      const certFile = filesMap?.['Certificado']?.[0];
+      const contrasena = req.body.Contrasena;
+
+      if (!contrasena) {
+        return res.status(400).json({ error: 'La contraseña de la FIEL es requerida.' });
+      }
+
+      // Reconstruct FormData for SAT-GO
+      const satFormData = new FormData();
+      if (keyFile) {
+        const blob = new Blob([keyFile.buffer], { type: 'application/octet-stream' });
+        satFormData.append('llavePrivada', blob, keyFile.originalname);
+      }
+      if (certFile) {
+        const blob = new Blob([certFile.buffer], { type: 'application/octet-stream' });
+        satFormData.append('Certificado', blob, certFile.originalname);
+      }
+      satFormData.append('Contrasena', contrasena);
+
+      // Build query parameters
+      const urlParams = new URLSearchParams();
+      for (const [key, val] of Object.entries(req.query)) {
+        if (val !== undefined) urlParams.append(key, String(val));
+      }
+      urlParams.set('api-version', '2.0');
+
+      const targetUrl = `https://api.sat-go.com/api/v2/Consultar/facfiel?${urlParams.toString()}`;
+      console.log(`[Proxy] fetching facfiel: ${targetUrl}, RFC: ${rfc}`);
+      const response = await fetch(targetUrl, {
+        method: 'POST',
+        headers: {
+          'RFC': String(rfc),
+          'Authorization': String(authHeader),
+          'Accept': 'application/json'
+        },
+        body: satFormData
+      });
+
+      console.log(`[Proxy] facfiel status: ${response.status}`);
+      if (!response.ok) {
+        const errText = await response.text();
+        console.error(`[Proxy] facfiel error body: ${errText}`);
+        return res.status(response.status).json({ error: getSatGoErrorMessage(response.status, errText, 'Error en la consulta FIEL de SAT-GO') });
+      }
+
+      const data = await response.json();
+      console.log(`[Proxy] facfiel success response comprobantes length: ${data?.comprobantes?.length || 0}`);
+      res.json(data);
+    } catch (error: any) {
+      console.error('Error in SAT-GO ConsultarFacFiel proxy:', error);
+      res.status(500).json({ error: error.message || 'Error interno al comunicarse con el Web Service de SAT-GO.' });
+    }
+  });
+
+  // 3. Consultar Facturas con CIEC (GET)
+  app.get('/api/sat-go/consultar-fac', async (req: Request, res: Response) => {
+    try {
+      const rfc = req.headers['rfc'];
+      const secret = req.headers['secret'];
+
+      if (!rfc || !secret) {
+        return res.status(400).json({ error: 'RFC y Clave CIEC (Secret) son requeridos.' });
+      }
+
+      const authHeader = await getSatGoKeyValue();
+
+      const urlParams = new URLSearchParams();
+      
+      let anio = req.query.anio;
+      let mes = req.query.mes;
+      let dia = req.query.dia;
+      
+      const fechaInicialStr = req.query.fecha_inicial;
+      if (fechaInicialStr && (!anio || !mes)) {
+        const cleanDateStr = String(fechaInicialStr).replace(' ', 'T');
+        const dateObj = new Date(cleanDateStr);
+        if (!isNaN(dateObj.getTime())) {
+          anio = String(dateObj.getFullYear());
+          mes = String(dateObj.getMonth() + 1);
+          dia = String(dateObj.getDate());
+        }
+      }
+
+      for (const [key, val] of Object.entries(req.query)) {
+        if (key !== 'fecha_inicial' && key !== 'fecha_final' && val !== undefined) {
+          urlParams.append(key, String(val));
+        }
+      }
+
+      if (anio) urlParams.set('anio', String(anio));
+      if (mes) urlParams.set('mes', String(mes));
+      if (dia) urlParams.set('dia', String(dia));
+      
+      urlParams.set('api-version', '2.0');
+
+      const targetUrl = `https://api.sat-go.com/api/v2/Consultar/fac?${urlParams.toString()}`;
+      console.log(`[Proxy] fetching fac (CIEC): ${targetUrl}, RFC: ${rfc}`);
+      const response = await fetch(targetUrl, {
+        method: 'GET',
+        headers: {
+          'RFC': String(rfc),
+          'Authorization': String(authHeader),
+          'Secret': String(secret),
+          'Accept': 'application/json'
+        }
+      });
+
+      console.log(`[Proxy] fac status: ${response.status}`);
+      if (!response.ok) {
+        const errText = await response.text();
+        console.error(`[Proxy] fac error body: ${errText}`);
+        return res.status(response.status).json({ error: getSatGoErrorMessage(response.status, errText, 'Error en la consulta CIEC de SAT-GO') });
+      }
+
+      const data = await response.json();
+      console.log(`[Proxy] fac success response comprobantes length: ${data?.comprobantes?.length || 0}`);
+      res.json(data);
+    } catch (error: any) {
+      console.error('Error in SAT-GO ConsultarFac proxy:', error);
+      res.status(500).json({ error: error.message || 'Error interno al comunicarse con el Web Service de SAT-GO.' });
+    }
+  });
+
+  // 4. Opinión de Cumplimiento con FIEL (POST multipart)
+  app.post('/api/sat-go/consultar-ocfiel', upload.fields([
+    { name: 'llavePrivada', maxCount: 1 },
+    { name: 'Certificado', maxCount: 1 }
+  ]), async (req: Request, res: Response) => {
+    try {
+      const rfc = req.headers['rfc'];
+      if (!rfc) {
+        return res.status(400).json({ error: 'El RFC es requerido.' });
+      }
+
+      const authHeader = await getSatGoKeyValue();
+
+      const filesMap = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
+      const keyFile = filesMap?.['llavePrivada']?.[0];
+      const certFile = filesMap?.['Certificado']?.[0];
+      const contrasena = req.body.Contrasena;
+
+      if (!contrasena) {
+        return res.status(400).json({ error: 'La contraseña de la FIEL es requerida.' });
+      }
+
+      const satFormData = new FormData();
+      if (keyFile) {
+        const blob = new Blob([keyFile.buffer], { type: 'application/octet-stream' });
+        satFormData.append('llavePrivada', blob, keyFile.originalname);
+      }
+      if (certFile) {
+        const blob = new Blob([certFile.buffer], { type: 'application/octet-stream' });
+        satFormData.append('Certificado', blob, certFile.originalname);
+      }
+      satFormData.append('Contrasena', contrasena);
+
+      const targetUrl = 'https://api.sat-go.com/api/v2/Consultar/ocfiel?api-version=2.0';
+      console.log(`[Proxy] fetching ocfiel: ${targetUrl}, RFC: ${rfc}`);
+      const response = await fetch(targetUrl, {
+        method: 'POST',
+        headers: {
+          'RFC': String(rfc),
+          'Authorization': String(authHeader),
+          'Accept': '*/*'
+        },
+        body: satFormData
+      });
+
+      console.log(`[Proxy] ocfiel status: ${response.status}`);
+      if (!response.ok) {
+        const errText = await response.text();
+        console.error(`[Proxy] ocfiel error body: ${errText}`);
+        return res.status(response.status).json({ error: getSatGoErrorMessage(response.status, errText, 'Error al obtener Opinión de Cumplimiento') });
+      }
+
+      // Convert PDF response stream to Base64 to send to React client
+      const arrayBuffer = await response.arrayBuffer();
+      const base64 = Buffer.from(arrayBuffer).toString('base64');
+      const contentType = response.headers.get('content-type') || 'application/pdf';
+      console.log(`[Proxy] ocfiel success. Base64 length: ${base64.length}`);
+
+      res.json({
+        success: true,
+        pdf_base64: base64,
+        content_type: contentType,
+        message: 'Opinión de Cumplimiento obtenida exitosamente.'
+      });
+    } catch (error: any) {
+      console.error('Error in SAT-GO Opinión de Cumplimiento FIEL proxy:', error);
+      res.status(500).json({ error: error.message || 'Error interno al comunicarse con el Web Service de SAT-GO.' });
+    }
+  });
+
+  // 5. Opinión de Cumplimiento con CIEC (GET)
+  app.get('/api/sat-go/consultar-oc', async (req: Request, res: Response) => {
+    try {
+      const rfc = req.headers['rfc'];
+      const secret = req.headers['secret'];
+
+      if (!rfc || !secret) {
+        return res.status(400).json({ error: 'RFC y Clave CIEC son requeridos.' });
+      }
+
+      const authHeader = await getSatGoKeyValue();
+
+      const targetUrl = 'https://api.sat-go.com/api/v2/Consultar/oc?api-version=2.0';
+      console.log(`[Proxy] fetching oc (CIEC): ${targetUrl}, RFC: ${rfc}`);
+      const response = await fetch(targetUrl, {
+        method: 'GET',
+        headers: {
+          'RFC': String(rfc),
+          'Authorization': String(authHeader),
+          'Secret': String(secret),
+          'Accept': '*/*'
+        }
+      });
+
+      console.log(`[Proxy] oc status: ${response.status}`);
+      if (!response.ok) {
+        const errText = await response.text();
+        console.error(`[Proxy] oc error body: ${errText}`);
+        return res.status(response.status).json({ error: getSatGoErrorMessage(response.status, errText, 'Error al obtener Opinión de Cumplimiento CIEC') });
+      }
+
+      const arrayBuffer = await response.arrayBuffer();
+      const base64 = Buffer.from(arrayBuffer).toString('base64');
+      const contentType = response.headers.get('content-type') || 'application/pdf';
+      console.log(`[Proxy] oc success. Base64 length: ${base64.length}`);
+
+      res.json({
+        success: true,
+        pdf_base64: base64,
+        content_type: contentType,
+        message: 'Opinión de Cumplimiento (CIEC) obtenida exitosamente.'
+      });
+    } catch (error: any) {
+      console.error('Error in SAT-GO Opinión de Cumplimiento CIEC proxy:', error);
+      res.status(500).json({ error: error.message || 'Error interno al comunicarse con el Web Service de SAT-GO.' });
+    }
+  });
+
+  // 6. Constancia de Situación Fiscal con FIEL (POST multipart)
+  app.post('/api/sat-go/consultar-csffiel', upload.fields([
+    { name: 'llavePrivada', maxCount: 1 },
+    { name: 'Certificado', maxCount: 1 }
+  ]), async (req: Request, res: Response) => {
+    try {
+      const rfc = req.headers['rfc'];
+      if (!rfc) {
+        return res.status(400).json({ error: 'El RFC es requerido.' });
+      }
+
+      const authHeader = await getSatGoKeyValue();
+
+      const filesMap = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
+      const keyFile = filesMap?.['llavePrivada']?.[0];
+      const certFile = filesMap?.['Certificado']?.[0];
+      const contrasena = req.body.Contrasena;
+
+      if (!contrasena) {
+        return res.status(400).json({ error: 'La contraseña de la FIEL es requerida.' });
+      }
+
+      const satFormData = new FormData();
+      if (keyFile) {
+        const blob = new Blob([keyFile.buffer], { type: 'application/octet-stream' });
+        satFormData.append('llavePrivada', blob, keyFile.originalname);
+      }
+      if (certFile) {
+        const blob = new Blob([certFile.buffer], { type: 'application/octet-stream' });
+        satFormData.append('Certificado', blob, certFile.originalname);
+      }
+      satFormData.append('Contrasena', contrasena);
+
+      const targetUrl = 'https://api.sat-go.com/api/v2/Consultar/csffiel?api-version=2.0';
+      console.log(`[Proxy] fetching csffiel: ${targetUrl}, RFC: ${rfc}`);
+      const response = await fetch(targetUrl, {
+        method: 'POST',
+        headers: {
+          'RFC': String(rfc),
+          'Authorization': String(authHeader),
+          'Accept': '*/*'
+        },
+        body: satFormData
+      });
+
+      console.log(`[Proxy] csffiel status: ${response.status}`);
+      if (!response.ok) {
+        const errText = await response.text();
+        console.error(`[Proxy] csffiel error body: ${errText}`);
+        return res.status(response.status).json({ error: getSatGoErrorMessage(response.status, errText, 'Error al obtener Constancia de Situación Fiscal') });
+      }
+
+      const arrayBuffer = await response.arrayBuffer();
+      const base64 = Buffer.from(arrayBuffer).toString('base64');
+      const contentType = response.headers.get('content-type') || 'application/pdf';
+      console.log(`[Proxy] csffiel success. Base64 length: ${base64.length}`);
+
+      res.json({
+        success: true,
+        pdf_base64: base64,
+        content_type: contentType,
+        message: 'Constancia de Situación Fiscal obtenida exitosamente.'
+      });
+    } catch (error: any) {
+      console.error('Error in SAT-GO CSF FIEL proxy:', error);
+      res.status(500).json({ error: error.message || 'Error interno al comunicarse con el Web Service de SAT-GO.' });
+    }
+  });
+
+  // 7. Constancia de Situación Fiscal con CIEC (GET)
+  app.get('/api/sat-go/consultar-csf', async (req: Request, res: Response) => {
+    try {
+      const rfc = req.headers['rfc'];
+      const secret = req.headers['secret'];
+
+      if (!rfc || !secret) {
+        return res.status(400).json({ error: 'RFC y Clave CIEC son requeridos.' });
+      }
+
+      const authHeader = await getSatGoKeyValue();
+
+      const targetUrl = 'https://api.sat-go.com/api/v2/Consultar/csf?api-version=2.0';
+      console.log(`[Proxy] fetching csf (CIEC): ${targetUrl}, RFC: ${rfc}`);
+      const response = await fetch(targetUrl, {
+        method: 'GET',
+        headers: {
+          'RFC': String(rfc),
+          'Authorization': String(authHeader),
+          'Secret': String(secret),
+          'Accept': '*/*'
+        }
+      });
+
+      console.log(`[Proxy] csf status: ${response.status}`);
+      if (!response.ok) {
+        const errText = await response.text();
+        console.error(`[Proxy] csf error body: ${errText}`);
+        return res.status(response.status).json({ error: getSatGoErrorMessage(response.status, errText, 'Error al obtener CSF CIEC') });
+      }
+
+      const arrayBuffer = await response.arrayBuffer();
+      const base64 = Buffer.from(arrayBuffer).toString('base64');
+      const contentType = response.headers.get('content-type') || 'application/pdf';
+      console.log(`[Proxy] csf success. Base64 length: ${base64.length}`);
+
+      res.json({
+        success: true,
+        pdf_base64: base64,
+        content_type: contentType,
+        message: 'Constancia de Situación Fiscal (CIEC) obtenida exitosamente.'
+      });
+    } catch (error: any) {
+      console.error('Error in SAT-GO CSF CIEC proxy:', error);
+      res.status(500).json({ error: error.message || 'Error interno al comunicarse con el Web Service de SAT-GO.' });
+    }
+  });
+
+  // 8. Dynamic Proxy XML Content: Fetches the raw XML text from a given urlDescarga to bypass browser CORS
+  app.get('/api/sat-go/proxy-xml', async (req: Request, res: Response) => {
+    try {
+      const { url } = req.query;
+      if (!url) {
+        return res.status(400).json({ error: 'URL del archivo XML es requerida.' });
+      }
+
+      const rfc = req.headers['rfc'];
+      const secret = req.headers['secret'];
+      const authHeader = await getSatGoKeyValue();
+
+      const headers: Record<string, string> = {
+        'Accept': 'application/json, application/xml, text/plain, */*',
+        'Authorization': String(authHeader)
+      };
+
+      if (rfc) {
+        headers['RFC'] = String(rfc);
+      }
+      if (secret) {
+        headers['Secret'] = String(secret);
+      }
+
+      const response = await fetch(String(url), {
+        headers
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        console.error(`[Proxy-XML] failed with status ${response.status}: ${errText}`);
+        return res.status(response.status).json({ error: getSatGoErrorMessage(response.status, errText, 'No se pudo descargar el XML de la URL provista.') });
+      }
+
+      const xmlText = await response.text();
+      res.setHeader('Content-Type', 'application/xml');
+      res.send(xmlText);
+    } catch (error: any) {
+      console.error('Error in proxy-xml endpoint:', error);
+      res.status(500).json({ error: error.message || 'Error interno al descargar el archivo XML.' });
     }
   });
 
