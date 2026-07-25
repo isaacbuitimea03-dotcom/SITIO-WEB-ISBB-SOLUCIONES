@@ -3,20 +3,24 @@ import { GoogleGenAI, Type } from "@google/genai";
 
 const router = Router();
 
-// Initialize Gemini Client
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
+// Helper to get GoogleGenAI instance on-demand
+function getAiClient() {
+  const apiKey = process.env.GEMINI_API_KEY || '';
+  return new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      }
     }
-  }
-});
+  });
+}
 
 // Helper for generating content with retry and fallback
 async function generateContentWithRetry(options: any, maxRetries = 3) {
   let attempt = 0;
   let delay = 1000;
+  const ai = getAiClient();
   
   while (attempt < maxRetries) {
     try {

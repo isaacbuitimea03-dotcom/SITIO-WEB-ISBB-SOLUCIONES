@@ -1,5 +1,6 @@
 {
   "version": 2,
+  "outputDirectory": "dist",
   "functions": {
     "api/index.ts": {
       "maxDuration": 60,
@@ -14,6 +15,10 @@
     {
       "source": "/api",
       "destination": "/api/index.ts"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
     }
   ]
 }

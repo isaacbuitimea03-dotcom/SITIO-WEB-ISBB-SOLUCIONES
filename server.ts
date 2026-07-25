@@ -4,10 +4,10 @@ import cors from 'cors';
 import multer from 'multer';
 
 // Import our modular routers
-import satRouter from './server/routes/sat';
-import aiRouter from './server/routes/ai';
-import bankRouter from './server/routes/bank';
-import { getAuthorizationHeader } from './server/utils/satGoClient';
+import satRouter from './server/routes/sat.js';
+import aiRouter from './server/routes/ai.js';
+import bankRouter from './server/routes/bank.js';
+import { getAuthorizationHeader } from './server/utils/satGoClient.js';
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });

@@ -8,7 +8,7 @@ import {
   consultarInformacionFiscalDirect,
   consultarEfosDirect,
   FielCredentials
-} from '../utils/satDirectClient';
+} from '../utils/satDirectClient.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage() });
