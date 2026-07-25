@@ -47,245 +47,21 @@ import AccountsManager from './components/AccountsManager';
 import BankStatementAnalyzer from './components/BankStatementAnalyzer';
 import { SatWebService } from './components/SatWebService';
 
-// Namespace and casing safe XML value extractor helpers
-const getAttrSafe = (el: Element | null, attrNames: string[]): string => {
-  if (!el) return '';
-  for (const name of attrNames) {
-    if (el.hasAttribute(name)) return el.getAttribute(name) || '';
-    if (el.hasAttribute(name.toLowerCase())) return el.getAttribute(name.toLowerCase()) || '';
-    const camel = name.charAt(0).toUpperCase() + name.slice(1);
-    if (el.hasAttribute(camel)) return el.getAttribute(camel) || '';
-  }
-  return '';
-};
-
-const getElementSafe = (parent: Document | Element, tags: string[]): Element | null => {
-  for (const tag of tags) {
-    let el = parent.getElementsByTagName(tag);
-    if (el.length > 0) return el[0];
-    
-    const localName = tag.includes(':') ? tag.split(':')[1] : tag;
-    el = parent.getElementsByTagName(localName);
-    if (el.length > 0) return el[0];
-  }
-  return null;
-};
-
-const getElementsSafe = (parent: Document | Element, tags: string[]): Element[] => {
-  for (const tag of tags) {
-    let el = parent.getElementsByTagName(tag);
-    if (el.length > 0) return Array.from(el);
-    const localName = tag.includes(':') ? tag.split(':')[1] : tag;
-    el = parent.getElementsByTagName(localName);
-    if (el.length > 0) return Array.from(el);
-  }
-  return [];
-};
-
-const isIvaTasaSpecial = (lbl: string): boolean => {
-  const norm = lbl.toLowerCase();
-  return (
-    norm.includes('iva') &&
-    !norm.includes('reten') &&
-    (norm.includes('16') || norm.includes('8') || norm.includes('0'))
-  );
-};
-
-// Lookup dictionaries for Mexican XML CFDI 4.0 Standard Codes
-const USO_CFDI_MAP: Record<string, string> = {
-  'G01': 'Adquisición de mercancías',
-  'G02': 'Devoluciones, descuentos o bonificaciones',
-  'G03': 'Gastos en general',
-  'I01': 'Construcciones',
-  'I02': 'Mobiliario y equipo de oficina por inversiones',
-  'I03': 'Equipo de transporte',
-  'I04': 'Equipo de cómputo y accesorios',
-  'I05': 'Dados, troqueles, moldes, matrices y herramental',
-  'I06': 'Comunicaciones telefónicas',
-  'I07': 'Comunicaciones de satélites',
-  'I08': 'Otra maquinaria y equipo',
-  'D01': 'Honorarios médicos, dentales y gastos hospitalarios',
-  'D02': 'Gastos médicos por incapacidad o discapacidad',
-  'D03': 'Gastos funerales',
-  'D04': 'Donativos',
-  'D05': 'Intereses reales efectivamente pagados por créditos hipotecarios (casa habitación)',
-  'D06': 'Aportaciones voluntarias al SAR',
-  'D07': 'Primas por seguros de gastos médicos',
-  'D08': 'Gastos de transportación escolar obligatoria',
-  'D10': 'Pagos por servicios educativos (colegiaturas)',
-  'S01': 'Sin efectos fiscales',
-  'CP01': 'Pagos',
-  'CN01': 'Nómina',
-};
-
-const FORMA_PAGO_MAP: Record<string, string> = {
-  '01': 'Efectivo',
-  '02': 'Cheque nominativo',
-  '03': 'Transferencia electrónica de fondos',
-  '04': 'Tarjeta de crédito',
-  '05': 'Monedero electrónico',
-  '06': 'Dinero electrónico',
-  '08': 'Vales de despensa',
-  '12': 'Dación en pago',
-  '13': 'Pago por subrogación',
-  '15': 'Pago por consignación',
-  '17': 'Compensación',
-  '23': 'Novación',
-  '24': 'Confusión',
-  '25': 'Remisión de deuda',
-  '26': 'Prescripción o caducidad',
-  '27': 'A los que se refiere la resolución miscelánea fiscal',
-  '28': 'Tarjeta de débito',
-  '29': 'Tarjeta de servicios',
-  '30': 'Aplicación de anticipos',
-  '31': 'Intermediario pagos',
-  '99': 'Por definir',
-};
-
-const getUsoCfdiName = (code: string): string => {
-  if (!code) return 'Sin especificar';
-  const clean = code.trim().toUpperCase();
-  return USO_CFDI_MAP[clean] || 'Uso personalizado o no listado';
-};
-
-const getFormaPagoName = (code: string): string => {
-  if (!code) return 'Sin especificar';
-  const clean = code.trim().toUpperCase();
-  const normalized = clean.length === 1 ? '0' + clean : clean;
-  return FORMA_PAGO_MAP[normalized] || 'Forma de pago no listada';
-};
-
-const getContractTypeName = (code: string): string => {
-  const map: Record<string, string> = {
-    '01': 'Contrato de trabajo por tiempo indeterminado',
-    '02': 'Contrato de trabajo por tiempo determinado',
-    '03': 'Contrato de trabajo por temporada',
-    '04': 'Contrato de trabajo por obra determinada',
-    '05': 'Contrato de trabajo por capacitación inicial',
-    '06': 'Contrato de trabajo por periodo de prueba',
-    '07': 'Contrato de trabajo por tiempo indeterminado sujeto a periodo de prueba',
-    '08': 'Contrato de trabajo por tiempo indeterminado con opción de capacitación inicial',
-    '09': 'Contrato de trabajo por tiempo indeterminado a tiempo parcial',
-    '10': 'Contrato de trabajo por tiempo indeterminado para el campo',
-    '99': 'Otro contrato'
-  };
-  return map[code.trim()] || 'Otro';
-};
-
-const getRegimenTypeName = (code: string): string => {
-  const map: Record<string, string> = {
-    '01': 'Sueldos',
-    '02': 'Sueldos (Sueldos y Salarios)',
-    '03': 'Jubilados',
-    '04': 'Pensionados',
-    '05': 'Asimilados Miembros Sociedades Cooperativas',
-    '06': 'Asimilados Integrantes Sociedades Civiles',
-    '07': 'Asimilados Miembros de Consejos',
-    '08': 'Asimilados Comisionistas',
-    '09': 'Asimilados Honorarios',
-    '10': 'Asimilados Acciones o Títulos',
-    '11': 'Asimilados Otros',
-    '12': 'Sueldos y salarios que no causan impuesto'
-  };
-  return map[code.trim()] || 'Sueldos y salarios';
-};
-
-const getPeriodicidadName = (code: string): string => {
-  const map: Record<string, string> = {
-    '01': 'Diario',
-    '02': 'Semanal',
-    '03': 'Catorcenal',
-    '04': 'Quincenal',
-    '05': 'Mensual',
-    '06': 'Bimestral',
-    '07': 'Unitaria',
-    '08': 'Comisión',
-    '09': 'Precio alzado',
-    '99': 'Otra Periodicidad'
-  };
-  return map[code.trim()] || 'Quincenal';
-};
-
-// Interface of extracted CFDI XML properties with detailed tax breakdown
-interface ParsedCFDI {
-  fileName: string;
-  folio: string;
-  serie: string;
-  fecha: string;
-  tipo: string; // 'I' (Ingreso), 'E' (Egreso), 'P' (Pago/Otros), 'N' (Nómina)
-  subTotal: number;
-  descuento: number;
-  total: number;
-  emisorRfc: string;
-  emisorNombre: string;
-  receptorRfc: string;
-  receptorNombre: string;
-  ivaTrasladado: number;
-  ivaAcreditable: number;
-  ivaRetenido: number;
-  isrRetenido: number;
-  conceptos: string[];
-
-  // Custom detailed fields for tax auditor requirements
-  usoCfdi: string;
-  usoCfdiDesc: string;
-  formaPago: string;
-  formaPagoDesc: string;
-  impuestoExento: number;
-  noObjetoImpuesto: number;
-  tasa0Base: number;
-  tasa16Base: number;
-  iepsTotal: number;
-
-  // Payroll/Nómina specific optional properties (ISBB premium suite)
-  isNomina?: boolean;
-  nominaVersion?: string;
-  nominaTipo?: string;
-  nominaFechaPago?: string;
-  nominaFechaInicialPago?: string;
-  nominaFechaFinalPago?: string;
-  nominaNumDiasPagados?: number;
-  nominaReceptorCurp?: string;
-  nominaReceptorNss?: string;
-  nominaReceptorTipoContrato?: string;
-  nominaReceptorTipoRegimen?: string;
-  nominaReceptorNumEmpleado?: string;
-  nominaReceptorPeriodicidadPago?: string;
-  nominaReceptorClaveEntFed?: string;
-  nominaTotalPercepciones?: number;
-  nominaTotalDeducciones?: number;
-  nominaTotalOtrosPagos?: number;
-  nominaNeto?: number;
-  nominaPercepcionesStr?: string;
-  nominaDeduccionesStr?: string;
-
-  // Granular payroll breakdown fields
-  percepcionSueldo?: number;
-  percepcionAguinaldoGrav?: number;
-  percepcionAguinaldoExent?: number;
-  percepcionPrimaVacGrav?: number;
-  percepcionPrimaVacExent?: number;
-  percepcionPrimaDomGrav?: number;
-  percepcionPrimaDomExent?: number;
-  percepcionHorasExtrasGrav?: number;
-  percepcionHorasExtrasExent?: number;
-  percepcionBonosGrav?: number;
-  percepcionBonosExent?: number;
-  percepcionPtuGrav?: number;
-  percepcionPtuExent?: number;
-  percepcionOtrosGrav?: number;
-  percepcionOtrosExent?: number;
-
-  deduccionIsr?: number;
-  deduccionImss?: number;
-  deduccionFondoAhorro?: number;
-  deduccionDescuentos?: number;
-  deduccionOtros?: number;
-  fechaHoraRaw?: string;
-  hora?: string;
-  isCancelada?: boolean;
-  allTaxesMap?: Record<string, { base: number; importe: number; tasaStr: string; type: string }>;
-}
+import { 
+  parseXMLData as parseXMLDataExternal, 
+  isIvaTasaSpecial, 
+  USO_CFDI_MAP, 
+  FORMA_PAGO_MAP, 
+  getUsoCfdiName, 
+  getFormaPagoName, 
+  getContractTypeName, 
+  getRegimenTypeName, 
+  getPeriodicidadName, 
+  ParsedCFDI,
+  getAttrSafe,
+  getElementSafe,
+  getElementsSafe
+} from './utils/xmlParser';
 
 // Interface for filter preset
 interface FilterPreset {
@@ -604,6 +380,9 @@ export default function App() {
 
   // --- XML PARSER ENGINE IN REACT ---
   const parseXMLData = (xmlText: string, fileName: string): ParsedCFDI => {
+    return parseXMLDataExternal(xmlText, fileName);
+  };
+  const parseXMLDataOriginalUnused = (xmlText: string, fileName: string): any => {
     const parser = new DOMParser();
     const xmlDoc = parser.parseFromString(xmlText, "text/xml");
     
@@ -1540,11 +1319,11 @@ export default function App() {
 
     filteredFilesList.forEach(f => {
       if (f.tipo === 'I') {
-        ingresosTotal += f.subTotal;
+        ingresosTotal += f.total;
         ingresosCount++;
         ivaTrasladadoTotal += f.ivaTrasladado;
       } else if (f.tipo === 'E') {
-        egresosTotal += f.subTotal;
+        egresosTotal += f.total;
         egresosCount++;
         ivaAcreditableTotal += f.ivaAcreditable;
       } else if (f.tipo === 'P') {
@@ -1638,6 +1417,10 @@ export default function App() {
         'Uso CFDI (Nombre)': f.usoCfdiDesc || 'Sin especificar',
         'Forma de Pago (Clave)': f.formaPago || 'S/E',
         'Forma de Pago (Nombre)': f.formaPagoDesc || 'Sin especificar',
+        'Régimen Fiscal Emisor (Clave)': f.emisorRegimenFiscal || 'S/E',
+        'Régimen Fiscal Emisor (Descripción)': f.emisorRegimenFiscalDesc || 'Sin especificar',
+        'Régimen Fiscal Receptor (Clave)': f.receptorRegimenFiscal || 'S/E',
+        'Régimen Fiscal Receptor (Descripción)': f.receptorRegimenFiscalDesc || 'Sin especificar',
         'Total Facturado ($)': f.total,
         'Conceptos Principales': f.conceptos.join(' | ')
       };
@@ -1656,7 +1439,62 @@ export default function App() {
     
     const workbook = XLSX.utils.book_new();
     const worksheet = XLSX.utils.json_to_sheet(excelRows);
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Auditoría General');
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Auditoría General (CFDIs)');
+    
+    // Add Itemized Concepts breakdown sheet (Desglose por Conceptos)
+    const itemizedConceptRows: any[] = [];
+    generalFiles.forEach(f => {
+      if (f.conceptosDetalle && f.conceptosDetalle.length > 0) {
+        f.conceptosDetalle.forEach((item, idx) => {
+          itemizedConceptRows.push({
+            'Archivo': f.fileName,
+            'UUID / Folio Fiscal': f.folio || 'N/A',
+            'Serie': f.serie || '',
+            'Fecha': f.fecha,
+            'Hora': f.hora || '00:00:00',
+            'Tipo CFDI': f.tipo,
+            'RFC Emisor': f.emisorRfc,
+            'Emisor': f.emisorNombre,
+            'RFC Receptor': f.receptorRfc,
+            'Receptor': f.receptorNombre,
+            'Item #': idx + 1,
+            'Clave Prod/Serv': item.claveProdServ || '',
+            'No. Identificación': item.noIdentificacion || '',
+            'Cantidad': item.cantidad || 1,
+            'Clave Unidad': item.claveUnidad || '',
+            'Unidad': item.unidad || '',
+            'Descripción del Concepto / Renglón': item.descripcion || '',
+            'Valor Unitario ($)': item.valorUnitario || 0,
+            'Importe ($)': item.importe || 0,
+            'Descuento ($)': item.descuento || 0,
+            'Objeto Impuesto': item.objetoImp || ''
+          });
+        });
+      } else if (f.conceptos && f.conceptos.length > 0) {
+        f.conceptos.forEach((concStr, idx) => {
+          itemizedConceptRows.push({
+            'Archivo': f.fileName,
+            'UUID / Folio Fiscal': f.folio || 'N/A',
+            'Serie': f.serie || '',
+            'Fecha': f.fecha,
+            'Hora': f.hora || '00:00:00',
+            'Tipo CFDI': f.tipo,
+            'RFC Emisor': f.emisorRfc,
+            'Emisor': f.emisorNombre,
+            'RFC Receptor': f.receptorRfc,
+            'Receptor': f.receptorNombre,
+            'Item #': idx + 1,
+            'Descripción del Concepto / Renglón': concStr,
+            'Importe ($)': f.subTotal || 0
+          });
+        });
+      }
+    });
+
+    if (itemizedConceptRows.length > 0) {
+      const wsConceptos = XLSX.utils.json_to_sheet(itemizedConceptRows);
+      XLSX.utils.book_append_sheet(workbook, wsConceptos, 'Desglose de Conceptos');
+    }
     
     // Add distinct high-fidelity sheet for Payroll (Nómina) break down
     const payrollFiles = sortedFiles.filter(f => f.isNomina || f.tipo === 'N');
@@ -1836,21 +1674,23 @@ export default function App() {
         })
       });
 
-      const contentType = response.headers.get('content-type') || '';
-      if (!contentType.includes('application/json')) {
-        const tempText = await response.text();
-        console.error('Non-JSON response received:', tempText.substring(0, 300));
-        throw new Error(
-          'Error de comunicación con el motor de auditoría SAT. Si estás alojando en Vercel, asegúrate de: 1) Haber configurado la variable de entorno GEMINI_API_KEY en tu panel de control de Vercel. 2) Recordar que Vercel interrumpe cualquier ejecución Serverless que tome más de 10 segundos en cuentas gratuitas. Para probar fluidamente, siempre puedes usar la versión de previsualización en vivo en el entorno Cloud Run de AI Studio.'
-        );
+      let data: any;
+      const resText = await response.text();
+      try {
+        data = JSON.parse(resText);
+      } catch {
+        console.error('Non-JSON response received:', resText.substring(0, 300));
+        if (resText.toLowerCase().includes('<!doctype') || resText.toLowerCase().includes('<html')) {
+          throw new Error(`El servidor respondió con una página HTML en lugar de JSON (Código ${response.status}).`);
+        }
+        throw new Error((resText && resText.substring(0, 200)) || 'Respuesta del servidor no válida.');
       }
 
       if (!response.ok) {
-        throw new Error('El servidor de Inteligencia Artificial SAT no respondió a tiempo.');
+        throw new Error(data.error || 'El servidor de Inteligencia Artificial SAT no respondió a tiempo.');
       }
 
-      const data = await response.json();
-      setAuditResult(data.result);
+      setAuditResult(data.response || data.result || 'Auditoría completada.');
     } catch (error: any) {
       console.error('AI XML audit error:', error);
       setAuditResult(`⚠️ Error: ${error.message || 'La auditoría con Inteligencia Artificial no pudo procesarse.'}`);

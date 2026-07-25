@@ -159,21 +159,23 @@ export default function BankStatementAnalyzer() {
             })
           });
 
-          const contentType = response.headers.get('content-type') || '';
-          if (!contentType.includes('application/json')) {
-            const tempText = await response.text();
-            console.error('Non-JSON response received:', tempText.substring(0, 300));
-            throw new Error(
-              'Error de comunicación con el motor de IA. Si estás alojando en Vercel/GitHub, asegúrate de: 1) Haber configurado la variable de entorno GEMINI_API_KEY en el Panel de Control de Vercel. 2) Considerar que la cuenta gratuita de Vercel (Hobby) interrumpe ejecuciones Serverless que superen los 10 segundos (frecuente con PDFs grandes). Para estados de cuenta pesados o pruebas óptimas, siempre puedes usar la URL de previsualización en vivo en AI Studio o el botón "Probar Demo con IA".'
-            );
+          let parsedRes: any;
+          const text = await response.text();
+          try {
+            parsedRes = JSON.parse(text);
+          } catch {
+            console.error('Non-JSON response received:', text.substring(0, 300));
+            if (text.toLowerCase().includes('<!doctype') || text.toLowerCase().includes('<html')) {
+              throw new Error(`El servidor respondió con una página HTML en lugar de JSON (Código ${response.status}).`);
+            }
+            throw new Error((text && text.substring(0, 200)) || 'Respuesta del servidor no válida.');
           }
 
           if (!response.ok) {
-            const errData = await response.json();
-            throw new Error(errData.error || 'No se pudo analizar el estado de cuenta.');
+            throw new Error(parsedRes.error || 'No se pudo analizar el estado de cuenta.');
           }
 
-          const parsedData: StatementData = await response.json();
+          const parsedData: StatementData = parsedRes;
           setStatement(parsedData);
           setLoading(false);
           clearInterval(animInterval);

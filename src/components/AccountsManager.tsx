@@ -18,11 +18,18 @@ import {
   ChevronRight,
   UserCheck,
   Check,
-  X
+  X,
+  Lock,
+  Eye,
+  EyeOff,
+  Edit3,
+  ShieldCheck,
+  FileCode,
+  FileText
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { AncofiClient, fileToBase64, saveClients } from '../utils/profileHelpers';
 
-// Interfaces aligned with main application
 interface AncofiUser {
   id: string;
   email: string;
@@ -31,16 +38,6 @@ interface AncofiUser {
   status: 'Activo' | 'Inactivo';
   createdAt: string;
   password?: string;
-}
-
-interface AncofiClient {
-  id: string;
-  rfc: string;
-  name: string;
-  regimen: string;
-  email: string;
-  phone?: string;
-  registeredAt: string;
 }
 
 interface AccountsManagerProps {
@@ -59,7 +56,7 @@ export default function AccountsManager({
   currentUser 
 }: AccountsManagerProps) {
   // Navigation inside the Accounts site: 'users' or 'clients'
-  const [managerTab, setManagerTab] = useState<'users' | 'clients'>('users');
+  const [managerTab, setManagerTab] = useState<'users' | 'clients'>('clients');
   
   // Search states
   const [userQuery, setUserQuery] = useState('');
@@ -74,13 +71,28 @@ export default function AccountsManager({
   const [userFormError, setUserFormError] = useState('');
   const [userSuccessMsg, setUserSuccessMsg] = useState('');
 
-  // --- NEW CLIENT FORM STATE ---
+  // --- CLIENT / PROFILE FORM STATE ---
   const [showAddClientModal, setShowAddClientModal] = useState(false);
+  const [editingClientId, setEditingClientId] = useState<string | null>(null);
   const [newClientName, setNewClientName] = useState('');
   const [newClientRfc, setNewClientRfc] = useState('');
   const [newClientRegimen, setNewClientRegimen] = useState('personas_morales');
   const [newClientEmail, setNewClientEmail] = useState('');
   const [newClientPhone, setNewClientPhone] = useState('');
+  const [newClientAuthType, setNewClientAuthType] = useState<'FIEL' | 'CIEC'>('FIEL');
+  
+  // FIEL Credentials
+  const [newClientFielPass, setNewClientFielPass] = useState('');
+  const [cerFileName, setCerFileName] = useState('');
+  const [cerBase64, setCerBase64] = useState('');
+  const [keyFileName, setKeyFileName] = useState('');
+  const [keyBase64, setKeyBase64] = useState('');
+
+  // CIEC Credential
+  const [newClientCiecPass, setNewClientCiecPass] = useState('');
+
+  // UI state
+  const [showPass, setShowPass] = useState(false);
   const [clientFormError, setClientFormError] = useState('');
   const [clientSuccessMsg, setClientSuccessMsg] = useState('');
 
@@ -166,8 +178,72 @@ export default function AccountsManager({
     }
   };
 
-  // --- ACTIONS FOR CLIENTS ---
-  const handleAddClient = (e: React.FormEvent) => {
+  // --- ACTIONS FOR CLIENTS & CREDENTIALS ---
+  const handleCerFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      setCerFileName(file.name);
+      try {
+        const b64 = await fileToBase64(file);
+        setCerBase64(b64);
+      } catch (err) {
+        console.error('Error al procesar certificado CER:', err);
+      }
+    }
+  };
+
+  const handleKeyFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      setKeyFileName(file.name);
+      try {
+        const b64 = await fileToBase64(file);
+        setKeyBase64(b64);
+      } catch (err) {
+        console.error('Error al procesar llave KEY:', err);
+      }
+    }
+  };
+
+  const openCreateClientModal = () => {
+    setEditingClientId(null);
+    setNewClientName('');
+    setNewClientRfc('');
+    setNewClientRegimen('personas_morales');
+    setNewClientEmail('');
+    setNewClientPhone('');
+    setNewClientAuthType('FIEL');
+    setNewClientFielPass('');
+    setCerFileName('');
+    setCerBase64('');
+    setKeyFileName('');
+    setKeyBase64('');
+    setNewClientCiecPass('');
+    setClientFormError('');
+    setClientSuccessMsg('');
+    setShowAddClientModal(true);
+  };
+
+  const openEditClientModal = (client: AncofiClient) => {
+    setEditingClientId(client.id);
+    setNewClientName(client.name);
+    setNewClientRfc(client.rfc);
+    setNewClientRegimen(client.regimen || 'personas_morales');
+    setNewClientEmail(client.email);
+    setNewClientPhone(client.phone || '');
+    setNewClientAuthType(client.authType || 'FIEL');
+    setNewClientFielPass(client.fielPassword || '');
+    setCerFileName(client.cerFileName || '');
+    setCerBase64(client.cerBase64 || '');
+    setKeyFileName(client.keyFileName || '');
+    setKeyBase64(client.keyBase64 || '');
+    setNewClientCiecPass(client.ciecPassword || '');
+    setClientFormError('');
+    setClientSuccessMsg('');
+    setShowAddClientModal(true);
+  };
+
+  const handleSaveClient = (e: React.FormEvent) => {
     e.preventDefault();
     setClientFormError('');
     setClientSuccessMsg('');
@@ -185,34 +261,45 @@ export default function AccountsManager({
       return;
     }
 
-    if (clients.some(c => c.rfc.toUpperCase() === cleanRfc)) {
+    if (!editingClientId && clients.some(c => c.rfc.toUpperCase() === cleanRfc)) {
       setClientFormError('El RFC ingresado ya se encuentra registrado con otro cliente.');
       return;
     }
 
-    const newClient: AncofiClient = {
-      id: `client-${Date.now()}`,
+    const updatedClient: AncofiClient = {
+      id: editingClientId || `client-${Date.now()}`,
       name: newClientName.trim(),
       rfc: cleanRfc,
       regimen: newClientRegimen,
       email: newClientEmail.trim().toLowerCase(),
       phone: newClientPhone.trim() || undefined,
-      registeredAt: new Date().toISOString().substring(0, 10)
+      authType: newClientAuthType,
+      fielPassword: newClientAuthType === 'FIEL' ? newClientFielPass : undefined,
+      cerFileName: newClientAuthType === 'FIEL' ? cerFileName : undefined,
+      cerBase64: newClientAuthType === 'FIEL' ? cerBase64 : undefined,
+      keyFileName: newClientAuthType === 'FIEL' ? keyFileName : undefined,
+      keyBase64: newClientAuthType === 'FIEL' ? keyBase64 : undefined,
+      ciecPassword: newClientAuthType === 'CIEC' ? newClientCiecPass : undefined,
+      registeredAt: editingClientId 
+        ? (clients.find(c => c.id === editingClientId)?.registeredAt || new Date().toISOString().substring(0, 10))
+        : new Date().toISOString().substring(0, 10)
     };
 
-    setClients(prev => [newClient, ...prev]);
+    let newClientsList: AncofiClient[];
+    if (editingClientId) {
+      newClientsList = clients.map(c => c.id === editingClientId ? updatedClient : c);
+    } else {
+      newClientsList = [updatedClient, ...clients];
+    }
 
-    // Clear form
-    setNewClientName('');
-    setNewClientRfc('');
-    setNewClientRegimen('personas_morales');
-    setNewClientEmail('');
-    setNewClientPhone('');
-    setClientSuccessMsg('Empresa / Cuenta Cliente registrada exitosamente en el catálogo fiscal.');
+    setClients(newClientsList);
+    saveClients(newClientsList);
+
+    setClientSuccessMsg(editingClientId ? 'Perfil fiscal y credenciales SAT actualizadas correctamente.' : 'Perfil y credenciales SAT guardadas exitosamente.');
     setTimeout(() => {
       setShowAddClientModal(false);
       setClientSuccessMsg('');
-    }, 1500);
+    }, 1200);
   };
 
   const handleDeleteClient = (id: string, name: string) => {
@@ -457,67 +544,93 @@ export default function AccountsManager({
                   <Building2 className="w-5 h-5 text-slate-400" />
                 </div>
                 <h5 className="text-xs font-bold text-slate-700">No hay clientes fiscales registrados</h5>
-                <p className="text-[10px] text-slate-400 max-w-sm mx-auto">Registre las razones sociales del SAT para tener la conciliación de CFDIs perfectamente ordenada.</p>
+                <p className="text-[10px] text-slate-400 max-w-sm mx-auto">Registre las razones sociales del SAT y sus credenciales (FIEL / CIEC) para la conciliación e importación.</p>
               </div>
             ) : (
-              <table className="w-full text-left border-collapse min-w-[700px]">
+              <table className="w-full text-left border-collapse min-w-[750px]">
                 <thead>
                   <tr className="border-b border-slate-150 bg-slate-50 text-[10px] uppercase font-mono tracking-wider text-slate-500">
                     <th className="py-3 px-6">Razón Social Contribuyente</th>
                     <th className="py-3 px-6">RFC del SAT</th>
                     <th className="py-3 px-6">Régimen Fiscal</th>
                     <th className="py-3 px-6">Contacto Directo</th>
-                    <th className="py-3 px-6">Afiliado Desde</th>
+                    <th className="py-3 px-6">Credenciales SAT</th>
                     <th className="py-3 px-6 text-right">Acciones</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 text-xs">
-                  {filteredClients.map((client) => (
-                    <tr key={client.id} className="hover:bg-slate-50 transition-colors">
-                      <td className="py-4 px-6 font-black text-slate-900 text-slate-850">
-                        <div className="flex items-center gap-2.5">
-                          <div className="w-8 h-8 rounded-xl bg-amber-500/10 border border-amber-500/15 flex items-center justify-center text-amber-700 font-bold font-mono text-[10px] shadow-sm">
-                            <Building2 className="w-4 h-4" />
+                  {filteredClients.map((client) => {
+                    const hasFiel = client.authType === 'FIEL' || (!client.authType && (client.fielPassword || client.cerBase64));
+                    const hasCiec = client.authType === 'CIEC' || client.ciecPassword;
+                    return (
+                      <tr key={client.id} className="hover:bg-slate-50 transition-colors">
+                        <td className="py-4 px-6 font-black text-slate-900 text-slate-850">
+                          <div className="flex items-center gap-2.5">
+                            <div className="w-8 h-8 rounded-xl bg-amber-500/10 border border-amber-500/15 flex items-center justify-center text-amber-700 font-bold font-mono text-[10px] shadow-sm">
+                              <Building2 className="w-4 h-4" />
+                            </div>
+                            <div>
+                              <p className="font-extrabold text-slate-850">{client.name}</p>
+                            </div>
                           </div>
-                          <div>
-                            <p className="font-extrabold text-slate-850">{client.name}</p>
+                        </td>
+                        <td className="py-4 px-6 font-mono tracking-wider text-[11px] font-black text-amber-700">
+                          <span className="bg-amber-500/10 border border-amber-500/20 px-2 py-1 rounded-lg inline-block">
+                            {client.rfc}
+                          </span>
+                        </td>
+                        <td className="py-4 px-6 text-slate-700 font-medium">
+                          <span className="bg-slate-100 border border-slate-200 px-2 py-0.5 rounded text-[10px]">
+                            {REGIMEN_LABELS[client.regimen] || client.regimen}
+                          </span>
+                        </td>
+                        <td className="py-4 px-6 space-y-0.5">
+                          <div className="flex items-center gap-1.5 text-slate-650">
+                            <Mail className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
+                            <span className="font-mono text-[11px]">{client.email}</span>
                           </div>
-                        </div>
-                      </td>
-                      <td className="py-4 px-6 text-slate-900 font-black font-mono tracking-wider text-[11px] text-amber-600 bg-amber-500/5 px-2 py-1 rounded inline-block mt-1">
-                        {client.rfc}
-                      </td>
-                      <td className="py-4 px-6 text-slate-700 font-medium">
-                        <span className="bg-slate-100 border border-slate-200 px-2 py-0.5 rounded text-[10px]">
-                          {REGIMEN_LABELS[client.regimen] || client.regimen}
-                        </span>
-                      </td>
-                      <td className="py-4 px-6 space-y-0.5">
-                        <div className="flex items-center gap-1.5 text-slate-650">
-                          <Mail className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
-                          <span className="font-mono text-[11px]">{client.email}</span>
-                        </div>
-                        {client.phone && (
-                          <div className="flex items-center gap-1.5 text-slate-500 text-[11px]">
-                            <Phone className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
-                            <span>{client.phone}</span>
-                          </div>
-                        )}
-                      </td>
-                      <td className="py-4 px-6 text-slate-500">
-                        {client.registeredAt}
-                      </td>
-                      <td className="py-4 px-6 text-right">
-                        <button
-                          onClick={() => handleDeleteClient(client.id, client.name)}
-                          className="p-1.5 rounded-lg border border-rose-150 hover:border-rose-250 bg-rose-50 hover:bg-rose-100 text-rose-500 shadow-sm transition-all focus:outline-none cursor-pointer active:scale-90"
-                          title="Eliminar del Catálogo"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
+                          {client.phone && (
+                            <div className="flex items-center gap-1.5 text-slate-500 text-[11px]">
+                              <Phone className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
+                              <span>{client.phone}</span>
+                            </div>
+                          )}
+                        </td>
+                        <td className="py-4 px-6">
+                          {hasFiel ? (
+                            <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-[11px] font-bold">
+                              <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                              <span>FIEL Guardada</span>
+                              {client.cerFileName && <span className="text-[9px] text-emerald-600">(.cer/.key)</span>}
+                            </div>
+                          ) : hasCiec ? (
+                            <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-blue-50 border border-blue-200 text-blue-800 text-[11px] font-bold">
+                              <Key className="w-3.5 h-3.5 text-blue-600" />
+                              <span>CIEC Guardada</span>
+                            </div>
+                          ) : (
+                            <span className="text-slate-400 italic text-[10px]">Sin credenciales</span>
+                          )}
+                        </td>
+                        <td className="py-4 px-6 text-right space-x-1.5">
+                          <button
+                            onClick={() => openEditClientModal(client)}
+                            className="p-1.5 rounded-lg border border-indigo-200 hover:border-indigo-300 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 shadow-sm transition-all focus:outline-none cursor-pointer active:scale-90 inline-flex items-center gap-1 text-[11px] font-bold px-2.5"
+                            title="Editar Perfil y Credenciales SAT"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" /> Editar
+                          </button>
+                          <button
+                            onClick={() => handleDeleteClient(client.id, client.name)}
+                            className="p-1.5 rounded-lg border border-rose-150 hover:border-rose-250 bg-rose-50 hover:bg-rose-100 text-rose-500 shadow-sm transition-all focus:outline-none cursor-pointer active:scale-90 inline-flex items-center"
+                            title="Eliminar del Catálogo"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             )}
@@ -671,7 +784,7 @@ export default function AccountsManager({
                 </button>
               </div>
 
-              <form onSubmit={handleAddClient} className="p-6 space-y-4">
+              <form onSubmit={handleSaveClient} className="p-6 space-y-4">
                 {clientFormError && (
                   <div className="p-3 bg-rose-50 border border-rose-100 rounded-xl flex items-center gap-2 text-xs font-semibold text-rose-650">
                     <AlertTriangle className="w-4 h-4 text-rose-500 flex-shrink-0" />

@@ -47,3 +47,35 @@
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
   background: #94a3b8;
 }
+
+@media print {
+  /* Hide all elements on the page */
+  body * {
+    visibility: hidden;
+  }
+  /* Show only the print-container and its descendants */
+  .print-container, .print-container * {
+    visibility: visible;
+  }
+  /* Position the print-container at the top-left */
+  .print-container {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100% !important;
+    max-width: 100% !important;
+    background: white !important;
+    color: black !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    box-shadow: none !important;
+    border: none !important;
+  }
+  /* Ensure background colors are printed */
+  body {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    background: white !important;
+  }
+}
+
