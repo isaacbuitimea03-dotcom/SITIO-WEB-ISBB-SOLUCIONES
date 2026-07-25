@@ -81,6 +81,9 @@ async function startServer() {
   });
 }
 
-startServer();
+// Only start standalone HTTP server when NOT running inside Vercel Serverless Functions
+if (!process.env.VERCEL && !process.env.VERCEL_ENV && !process.env.NOW_REGION) {
+  startServer();
+}
 
 export default app;
