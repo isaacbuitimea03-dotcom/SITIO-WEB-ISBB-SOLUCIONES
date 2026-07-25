@@ -16,33 +16,33 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// App Health
-app.get('/api/health', (req: Request, res: Response) => {
-  res.json({ status: 'ok', message: 'ISBB Soluciones active' });
+// App Health & Status API
+app.get(['/api/health', '/api'], (req: Request, res: Response) => {
+  res.json({ status: 'ok', message: 'ISBB Soluciones API active' });
 });
 
-// Mount Modular API Routers
+// Mount Modular API Routers under /api
 app.use('/api/sat', satRouter);
 app.use('/api/sat-go', satRouter);
 app.use('/api/ai', aiRouter);
 app.use('/api/bank', bankRouter);
 
-// Root level /api aliases
-app.use('/api', aiRouter);
-app.use('/api', bankRouter);
-app.use('/api', satRouter);
-
-// Forward non-prefixed direct API endpoints if requested without /api
-app.use([
+// Direct API endpoint aliases (with and without /api)
+const satDirectEndpoints = [
   '/csffiel', '/consultar-csffiel', '/ocfiel', '/consultar-ocfiel',
   '/facfiel', '/consultar-facfiel', '/retencionfiel', '/informacionfiscalfiel',
   '/solicita', '/verifica', '/descarga', '/createkey', '/create-key'
-], satRouter);
+];
 
-app.use(['/analyze-tax-ai', '/analyze-xml-ai'], aiRouter);
-app.use('/analyze-pdf-statement', bankRouter);
+satDirectEndpoints.forEach(ep => {
+  app.use(ep, satRouter);
+  app.use(`/api${ep}`, satRouter);
+});
 
-// Catch-all for any unmatched /api/* route to ensure JSON responses instead of HTML fallback
+app.use(['/analyze-tax-ai', '/analyze-xml-ai', '/api/analyze-tax-ai', '/api/analyze-xml-ai'], aiRouter);
+app.use(['/analyze-pdf-statement', '/api/analyze-pdf-statement'], bankRouter);
+
+// Catch-all for unmatched /api/* routes to guarantee 404 JSON response
 app.all('/api/*', (req: Request, res: Response) => {
   res.setHeader('Content-Type', 'application/json');
   res.status(404).json({ error: `Ruta de API no encontrada: ${req.method} ${req.path}` });
