@@ -307,6 +307,12 @@ export async function solicitaDescargaDirect(
   const requestId = queryResult.getRequestId();
 
   if (code !== 5000 && !requestId) {
+    if (code === 5004) {
+      throw new Error(`[SAT Servicio Web - 5004] No se encontraron comprobantes fiscales en el SAT para las fechas o filtros seleccionados (${params.fecha_inicial} a ${params.fecha_final}).`);
+    }
+    if (code === 5005) {
+      throw new Error(`[SAT Servicio Web - 5005] Existe una solicitud en proceso idéntica enviada recientemente al SAT. Espere unos momentos o verifique el historial de solicitudes.`);
+    }
     throw new Error(`[SAT Servicio Web - ${code}] ${message || 'Error al enviar solicitud al SAT.'}`);
   }
 
@@ -473,9 +479,9 @@ export async function consultarFacturasFielDirect(
   }
 
   // Polling loop: SAT Web Service generates packages asynchronously.
-  // Retry 'verify' up to 4 times with a delay (~12-14 seconds total)
+  // Retry 'verify' up to 6 times with a delay (~20-22 seconds total)
   let verifyRes: any = null;
-  const maxAttempts = 4;
+  const maxAttempts = 6;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     console.log(`[SAT Direct] Verificando solicitud ${requestId} (intento ${attempt}/${maxAttempts})...`);
     verifyRes = await verificaSolicitudDirect(creds, requestId);
@@ -537,13 +543,13 @@ export async function consultarFacturasFielDirect(
   if (estadoText === 'Rechazada') {
     mensajeDetallado = `La solicitud (${requestId}) fue Rechazada por los servidores del SAT (Estatus 5: Rechazada). Causas probables: 1) Existe una solicitud idéntica en proceso enviada recientemente. 2) El periodo excede el límite permitido (>2,000 CFDIs) en descarga completa de XML. Se recomienda intentar con modalidad "Metadata" o esperar 2 minutos antes de reintentar.`;
   } else if (estadoText === 'Terminada') {
-    mensajeDetallado = `La solicitud (${requestId}) concluyó en el SAT, pero no se generaron paquetes de descarga. Es posible que no existan facturas en el periodo solicitado o con los filtros especificados.`;
+    mensajeDetallado = `La solicitud (${requestId}) concluyó en el SAT. No se encontraron facturas en el periodo solicitado o con los filtros especificados.`;
   } else if (estadoText === 'Error') {
-    mensajeDetallado = `El servicio web del SAT reportó un error al procesar la solicitud (${requestId}). Intente nuevamente.`;
+    mensajeDetallado = `El servicio web del SAT reportó un error al procesar la solicitud (${requestId}). Intente nuevamente en unos instantes.`;
   } else if (estadoText === 'Vencida') {
     mensajeDetallado = `La solicitud (${requestId}) excedió el periodo de vigencia en el SAT (72 hrs) y ha vencido.`;
-  } else if (!mensajeDetallado) {
-    mensajeDetallado = `La solicitud fue recibida y aceptada por el SAT (Folio ID: ${requestId}). Los paquetes masivos de XML están siendo generados por los servidores del SAT de forma asíncrona. Presione "Verificar / Descargar XMLs" para obtener los comprobantes tan pronto el SAT concluya el empaquetado.`;
+  } else {
+    mensajeDetallado = `La solicitud fue recibida y aceptada por el SAT (Folio ID: ${requestId}). Los servidores del SAT están generando los paquetes XML de forma asíncrona. El sistema continuará sincronizando automáticamente hasta obtener sus comprobantes.`;
   }
 
   return {

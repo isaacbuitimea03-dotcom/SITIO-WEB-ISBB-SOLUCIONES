@@ -676,8 +676,17 @@ export function SatWebService() {
         setSuccessMessage(`¡Se recuperaron y procesaron ${data.facturas.length} comprobantes XML del SAT!`);
         setAutoPollActive(false);
         registerSolicitudInHistory(targetId, 'Terminada', data.facturas.length);
+      } else if (data.estadoSolicitud === 'Terminada') {
+        setSuccessMessage(`Consulta finalizada en el SAT (Folio: ${targetId}). No existen comprobantes en este periodo.`);
+        setAutoPollActive(false);
+        registerSolicitudInHistory(targetId, 'Terminada', 0);
+      } else if (data.estadoSolicitud === 'Rechazada' || data.estadoSolicitud === 'Error' || data.estadoSolicitud === 'Vencida') {
+        setAutoPollActive(false);
+        setErrorMessage(data.mensaje || `Solicitud ${data.estadoSolicitud} por el SAT.`);
+        registerSolicitudInHistory(targetId, data.estadoSolicitud);
       } else {
-        setSuccessMessage(`Estatus SAT: ${data.estadoSolicitud || 'En Proceso'}. (Folio de Solicitud: ${targetId}).`);
+        setAutoPollActive(true);
+        setSuccessMessage(`Estatus SAT: ${data.estadoSolicitud || 'En Proceso'}. (Folio de Solicitud: ${targetId}). Sincronizando...`);
         registerSolicitudInHistory(targetId, data.estadoSolicitud || 'En Proceso');
       }
     } catch (err: any) {
@@ -735,9 +744,12 @@ export function SatWebService() {
 
       if (data.facturas && data.facturas.length > 0) {
         setSuccessMessage(`¡Consulta completada con éxito! Se obtuvieron ${data.facturas.length} comprobante(s) fiscal(es).`);
-      } else if (data.idSolicitud) {
-        setSuccessMessage(`Solicitud registrada en el SAT (Folio ID: ${data.idSolicitud}). Los servidores del SAT están generando los paquetes XML.`);
+        setAutoPollActive(false);
+      } else if (data.idSolicitud && (data.estadoSolicitud === 'En Proceso' || data.estadoSolicitud === 'Aceptada' || data.codEstatus === 5004 || data.codEstatus === 5000)) {
+        setAutoPollActive(true);
+        setSuccessMessage(`⚡ Solicitud procesándose en los servidores del SAT (ID: ${data.idSolicitud}). Sincronizando de forma automática...`);
       } else {
+        setAutoPollActive(false);
         setSuccessMessage('¡Consulta finalizada exitosamente!');
       }
     } catch (err: any) {
@@ -751,10 +763,17 @@ export function SatWebService() {
   // Auto-polling timer when SAT is processing request
   useEffect(() => {
     let timer: any = null;
-    if (autoPollActive && facturasResult?.idSolicitud && (!facturasResult?.facturas || facturasResult?.facturas.length === 0)) {
+    const isPending = facturasResult?.idSolicitud && 
+      (!facturasResult?.facturas || facturasResult?.facturas.length === 0) &&
+      facturasResult?.estadoSolicitud !== 'Terminada' &&
+      facturasResult?.estadoSolicitud !== 'Rechazada' &&
+      facturasResult?.estadoSolicitud !== 'Error' &&
+      facturasResult?.estadoSolicitud !== 'Vencida';
+
+    if (autoPollActive && isPending) {
       timer = setInterval(() => {
         handleRevisarEstatusFacturas(facturasResult.idSolicitud);
-      }, 10000);
+      }, 6000);
     }
     return () => {
       if (timer) clearInterval(timer);
@@ -1602,12 +1621,12 @@ export function SatWebService() {
               ) : (
                 /* CASE 3: Facturas array is empty, but idSolicitud is active/in process */
                 <div className="space-y-6">
-                  <div className="p-6 rounded-2xl bg-amber-50/80 border border-amber-200/90 space-y-4">
-                    <div className="flex items-start gap-3">
-                      <div className="p-2.5 rounded-xl bg-amber-100 text-amber-800 shrink-0 mt-0.5">
-                        <Clock className="w-6 h-6 animate-pulse" />
+                  <div className="p-6 rounded-2xl bg-amber-50/90 border border-amber-200/90 space-y-4 shadow-xs">
+                    <div className="flex items-start gap-3.5">
+                      <div className="p-3 rounded-2xl bg-amber-100/80 text-amber-900 shrink-0 mt-0.5 border border-amber-200">
+                        <Clock className="w-6 h-6 animate-spin text-amber-700" />
                       </div>
-                      <div className="space-y-1.5 flex-1">
+                      <div className="space-y-2 flex-1">
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <h4 className="font-bold text-amber-950 text-base flex items-center gap-2">
                             <span>Solicitud Registrada en el Web Service del SAT</span>
@@ -1615,19 +1634,36 @@ export function SatWebService() {
                               {facturasResult.estadoSolicitud || 'En Proceso'}
                             </span>
                           </h4>
+
+                          {autoPollActive && (
+                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-amber-200/80 text-amber-950 border border-amber-300 animate-pulse">
+                              <RefreshCw className="w-3 h-3 animate-spin text-amber-800" />
+                              Auto-Sincronización Activa (cada 6s)
+                            </span>
+                          )}
                         </div>
 
-                        <p className="text-xs text-amber-900 leading-relaxed">
-                          El servicio web del SAT aceptó su petición con Folio de Solicitud{' '}
-                          <strong className="font-mono bg-amber-100 px-2 py-0.5 rounded text-amber-950 border border-amber-300">
+                        <p className="text-xs text-amber-950 leading-relaxed font-medium">
+                          El servicio web del SAT asignó el Folio de Solicitud{' '}
+                          <strong className="font-mono bg-amber-100/90 px-2 py-0.5 rounded text-amber-950 border border-amber-300">
                             {facturasResult.idSolicitud}
                           </strong>
-                          . Los servidores del SAT están generando y empaquetando sus archivos XML de manera asíncrona.
+                          . Los servidores del SAT están generando los paquetes ZIP de forma asíncrona.
                         </p>
+
+                        <div className="bg-amber-100/50 p-3 rounded-xl border border-amber-200/80 text-[11px] text-amber-900 space-y-1">
+                          <div className="font-bold flex items-center gap-1.5">
+                            <Zap className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+                            <span>¿Por qué ocurre esto?</span>
+                          </div>
+                          <p>
+                            El SAT procesa descargas masivas en su servidor central de empaquetado. El sistema verifica automáticamente cada 6 segundos hasta que el SAT concluye y descarga todos los comprobantes XML a su pantalla sin que tenga que hacer nada.
+                          </p>
+                        </div>
                       </div>
                     </div>
 
-                    <div className="pt-3 border-t border-amber-200/60 flex flex-col sm:flex-row items-center justify-between gap-4">
+                    <div className="pt-3 border-t border-amber-200/70 flex flex-col sm:flex-row items-center justify-between gap-4">
                       <label className="inline-flex items-center gap-2 text-xs font-bold text-amber-950 cursor-pointer">
                         <input
                           type="checkbox"
@@ -1635,26 +1671,39 @@ export function SatWebService() {
                           onChange={(e) => setAutoPollActive(e.target.checked)}
                           className="w-4 h-4 text-amber-600 rounded border-amber-300 focus:ring-amber-500"
                         />
-                        <span>🔄 Revisar estatus automáticamente cada 10 segundos</span>
+                        <span>🔄 Verificar estatus en segundo plano automáticamente</span>
                       </label>
 
-                      <button
-                        onClick={() => handleRevisarEstatusFacturas(facturasResult.idSolicitud)}
-                        disabled={isConsultingFacturas}
-                        className="w-full sm:w-auto px-6 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs shadow-md inline-flex items-center justify-center gap-2 transition-all disabled:opacity-50"
-                      >
-                        {isConsultingFacturas ? (
-                          <>
-                            <RefreshCw className="w-4 h-4 animate-spin" />
-                            Verificando Paquetes en SAT...
-                          </>
-                        ) : (
-                          <>
-                            <RefreshCw className="w-4 h-4" />
-                            Verificar Estatus y Cargar XMLs Ahora
-                          </>
-                        )}
-                      </button>
+                      <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+                        <button
+                          onClick={() => {
+                            setFacturaFilters(prev => ({ ...prev, tipoBusqueda: '2' }));
+                            setTimeout(() => handleConsultarFacturas(), 100);
+                          }}
+                          disabled={isConsultingFacturas}
+                          className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs inline-flex items-center gap-1.5 transition-all"
+                        >
+                          <FileText className="w-3.5 h-3.5" /> Modo Metadata (Resumen Rápido)
+                        </button>
+
+                        <button
+                          onClick={() => handleRevisarEstatusFacturas(facturasResult.idSolicitud)}
+                          disabled={isConsultingFacturas}
+                          className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs shadow-md inline-flex items-center justify-center gap-2 transition-all disabled:opacity-50"
+                        >
+                          {isConsultingFacturas ? (
+                            <>
+                              <RefreshCw className="w-4 h-4 animate-spin" />
+                              Verificando Paquetes en SAT...
+                            </>
+                          ) : (
+                            <>
+                              <RefreshCw className="w-4 h-4" />
+                              Verificar Estatus Ahora
+                            </>
+                          )}
+                        </button>
+                      </div>
                     </div>
                   </div>
 
