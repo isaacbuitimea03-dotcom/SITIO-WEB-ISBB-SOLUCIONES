@@ -943,16 +943,10 @@ export function SatWebService() {
       });
 
       try {
-        for (let i = 0; i < monthPeriods.length; i++) {
-          const period = monthPeriods[i];
-          setBatchSyncInfo({
-            active: true,
-            currentLabel: period.label,
-            completedMonths: i,
-            totalMonths: monthPeriods.length,
-            accumulatedCount: allFacturas.length
-          });
+        const CONCURRENCY = 3;
+        let completedCount = 0;
 
+        const fetchPeriod = async (period: { start: string; end: string; label: string }) => {
           const fd = getFormDataWithFiles();
           fd.append('fecha_inicial', `${period.start}T00:00:00`);
           fd.append('fecha_final', `${period.end}T23:59:59`);
@@ -968,36 +962,78 @@ export function SatWebService() {
           });
 
           const data = await parseResponseJson(res);
-          if (data.idSolicitud) {
-            lastSolicitudId = data.idSolicitud;
-            registerSolicitudInHistory(data.idSolicitud, data.estadoSolicitud || 'Aceptada', data.facturas?.length);
-          }
 
-          if (data.facturas && data.facturas.length > 0) {
-            allFacturas.push(...data.facturas);
-            if (data.xmlFiles) allXmls.push(...data.xmlFiles);
-          } else if (data.idSolicitud && (data.estadoSolicitud === 'En Proceso' || data.estadoSolicitud === 'Aceptada')) {
-            // Quick poll up to 2 times for this month
-            for (let poll = 0; poll < 2; poll++) {
-              await new Promise(r => setTimeout(r, 1500));
-              const pollFd = getFormDataWithFiles();
-              pollFd.append('requestId', data.idSolicitud);
-              pollFd.append('fecha_inicial', `${period.start}T00:00:00`);
-              pollFd.append('fecha_final', `${period.end}T23:59:59`);
-              pollFd.append('tipo', facturaFilters.tipo);
-              pollFd.append('tipoBusqueda', facturaFilters.tipoBusqueda);
-              pollFd.append('estatusFactura', facturaFilters.estatusFactura);
+          // Quick poll if needed
+          if ((!data.facturas || data.facturas.length === 0) && data.idSolicitud && (data.estadoSolicitud === 'En Proceso' || data.estadoSolicitud === 'Aceptada')) {
+            await new Promise(r => setTimeout(r, 1000));
+            const pollFd = getFormDataWithFiles();
+            pollFd.append('requestId', data.idSolicitud);
+            pollFd.append('fecha_inicial', `${period.start}T00:00:00`);
+            pollFd.append('fecha_final', `${period.end}T23:59:59`);
+            pollFd.append('tipo', facturaFilters.tipo);
+            pollFd.append('tipoBusqueda', facturaFilters.tipoBusqueda);
+            pollFd.append('estatusFactura', facturaFilters.estatusFactura);
 
-              const pollRes = await fetch('/api/sat/facfiel', { method: 'POST', body: pollFd });
-              const pollData = await parseResponseJson(pollRes);
-              if (pollData.facturas && pollData.facturas.length > 0) {
-                allFacturas.push(...pollData.facturas);
-                if (pollData.xmlFiles) allXmls.push(...pollData.xmlFiles);
-                registerSolicitudInHistory(data.idSolicitud, 'Terminada', pollData.facturas.length);
-                break;
-              }
+            const pollRes = await fetch('/api/sat/facfiel', { method: 'POST', body: pollFd });
+            const pollData = await parseResponseJson(pollRes);
+            if (pollData.facturas && pollData.facturas.length > 0) {
+              return pollData;
             }
           }
+
+          return data;
+        };
+
+        for (let i = 0; i < monthPeriods.length; i += CONCURRENCY) {
+          const chunk = monthPeriods.slice(i, i + CONCURRENCY);
+          const currentLabels = chunk.map(p => p.label).join(', ');
+
+          setBatchSyncInfo({
+            active: true,
+            currentLabel: currentLabels,
+            completedMonths: completedCount,
+            totalMonths: monthPeriods.length,
+            accumulatedCount: allFacturas.length
+          });
+
+          const results = await Promise.all(
+            chunk.map(p => fetchPeriod(p).catch(err => {
+              console.warn('Error en periodo:', p.label, err);
+              return { error: err?.message };
+            }))
+          );
+
+          for (const data of results) {
+            if (data?.idSolicitud) {
+              lastSolicitudId = data.idSolicitud;
+              registerSolicitudInHistory(data.idSolicitud, data.estadoSolicitud || 'Aceptada', data.facturas?.length);
+            }
+
+            if (data?.facturas && data.facturas.length > 0) {
+              allFacturas.push(...data.facturas);
+              if (data.xmlFiles) allXmls.push(...data.xmlFiles);
+            }
+          }
+
+          completedCount += chunk.length;
+
+          // Stream invoices live into UI table so user sees results immediately
+          setFacturasResult({
+            idSolicitud: lastSolicitudId || 'BATCH_ANUAL',
+            estadoSolicitud: 'Terminada',
+            facturas: [...allFacturas],
+            comprobantes: [...allFacturas],
+            xmlFiles: [...allXmls],
+            mensaje: `Cargando ultra-rápido... (${completedCount}/${monthPeriods.length} meses procesados - ${allFacturas.length} comprobantes encontrados)`
+          });
+
+          setBatchSyncInfo({
+            active: true,
+            currentLabel: currentLabels,
+            completedMonths: Math.min(completedCount, monthPeriods.length),
+            totalMonths: monthPeriods.length,
+            accumulatedCount: allFacturas.length
+          });
         }
 
         setFacturasResult({
@@ -1009,7 +1045,7 @@ export function SatWebService() {
           mensaje: `Sincronización del periodo (${facturaFilters.fecha_inicial} a ${facturaFilters.fecha_final}) completada. Se obtuvieron ${allFacturas.length} comprobantes en ${monthPeriods.length} sub-periodos.`
         });
 
-        setSuccessMessage(`¡Sincronización del periodo (${facturaFilters.fecha_inicial} a ${facturaFilters.fecha_final}) completada! Se obtuvieron y procesaron ${allFacturas.length} comprobantes fiscales.`);
+        setSuccessMessage(`¡Sincronización del periodo (${facturaFilters.fecha_inicial} a ${facturaFilters.fecha_final}) completada con éxito! Se obtuvieron ${allFacturas.length} comprobantes fiscales.`);
       } catch (err: any) {
         console.error(err);
         setErrorMessage(formatFetchError(err));
