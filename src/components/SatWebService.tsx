@@ -3,6 +3,8 @@ import JSZip from 'jszip';
 import * as XLSX from 'xlsx';
 import { parseXMLData, isIvaTasaSpecial, ParsedCFDI } from '../utils/xmlParser';
 import { AncofiClient, getSavedClients, saveClients, fileToBase64, base64ToFile } from '../utils/profileHelpers';
+import { downloadCsfPdf, buildCsfDataFromClient, downloadClientCsfFileOrGeneratedPdf, generateCsfPdfBlob } from '../utils/csfPdfGenerator';
+
 import {
   Key,
   FileText,
@@ -70,8 +72,8 @@ interface FacturaItem {
 }
 
 export function SatWebService() {
-  // Active Tab: 'csf' | 'oc' | 'facturas' | 'solicita' | 'efos' | 'info' | 'perfiles'
-  const [activeTab, setActiveTab] = useState<'csf' | 'oc' | 'facturas' | 'solicita' | 'efos' | 'info' | 'perfiles'>('facturas');
+  // Active Tab: 'facturas' | 'perfiles'
+  const [activeTab, setActiveTab] = useState<'facturas' | 'perfiles'>('facturas');
 
   // Saved Profiles / Clients State
   const [savedProfiles, setSavedProfiles] = useState<AncofiClient[]>(() => getSavedClients());
@@ -226,9 +228,172 @@ export function SatWebService() {
   // ==========================================
   // TAB 1: CONSTANCIA DE SITUACIÓN FISCAL (CSF)
   // ==========================================
+  const [csfMode, setCsfMode] = useState<'scraper' | 'fiel'>('scraper');
+  const [csfScraperInput, setCsfScraperInput] = useState('');
+  const [isConsultingScraperCsf, setIsConsultingScraperCsf] = useState(false);
+  const [csfScraperData, setCsfScraperData] = useState<any>(null);
   const [isConsultingCsf, setIsConsultingCsf] = useState(false);
   const [csfPdfBlobUrl, setCsfPdfBlobUrl] = useState<string | null>(null);
   const [csfDataResult, setCsfDataResult] = useState<any>(null);
+  const [selectedCsfClientRfc, setSelectedCsfClientRfc] = useState<string>('');
+
+  const handleDownloadDirectCsfPdf = async (targetClientRfc?: string) => {
+    setErrorMessage('');
+    setSuccessMessage('');
+    const clientsList = getSavedClients();
+    const rfcToUse = targetClientRfc || selectedCsfClientRfc || fiel.rfc;
+    const matchedClient = clientsList.find(c => c.rfc.toUpperCase() === rfcToUse.toUpperCase());
+    
+    const clientToUse = matchedClient || {
+      rfc: fiel.rfc || 'ISM980121V98',
+      name: fiel.razonSocial || 'CONTRIBUYENTE ANCOFI SAT',
+      regimen: fiel.regimen || 'personas_morales',
+      email: fiel.email || 'contacto@sat.gob.mx'
+    };
+
+    await downloadClientCsfFileOrGeneratedPdf(clientToUse);
+    setSuccessMessage(`¡Constancia de Situación Fiscal (CSF) descargada para ${clientToUse.name} (${clientToUse.rfc})!`);
+  };
+
+  /**
+   * Obtiene la Constancia de Situación Fiscal (CSF) del usuario vía csf-sat-scraper,
+   * procesa el binario / datos recibidos y genera un archivo PDF descargable en el navegador.
+   */
+  const handleObtenerYDescargarCsfConScraper = async (customInput?: string) => {
+    setErrorMessage('');
+    setSuccessMessage('');
+
+    const targetInput = customInput || csfScraperInput || fiel.rfc;
+    if (!targetInput || !targetInput.trim()) {
+      setErrorMessage('Por favor ingrese la URL de la Cédula de Identificación Fiscal, el enlace QR del SAT o idCIF_RFC.');
+      return;
+    }
+
+    setIsConsultingScraperCsf(true);
+    try {
+      const res = await fetch('/api/sat/csf-scraper', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          input: targetInput.trim(),
+          rfc: fiel.rfc || undefined,
+          asBinary: true
+        })
+      });
+
+      const contentType = res.headers.get('content-type') || '';
+      let pdfBlob: Blob;
+      let csfObj: any = null;
+
+      if (contentType.includes('application/pdf')) {
+        // Binario PDF recibido directamente del scraper
+        const arrayBuffer = await res.arrayBuffer();
+        pdfBlob = new Blob([arrayBuffer], { type: 'application/pdf' });
+      } else {
+        // Respuesta JSON parseada con los datos fiscales escaneados
+        const data = await parseResponseJson(res);
+        if (!data.csf && !data.rfc) {
+          throw new Error(data.error || 'No se pudo obtener la Constancia de Situación Fiscal.');
+        }
+
+        csfObj = data.csf || data;
+        setCsfScraperData(csfObj);
+
+        // Guardar datos escaneados en perfil si está en el catálogo
+        try {
+          const savedClients = getSavedClients();
+          const existingIndex = savedClients.findIndex(c => c.rfc.toUpperCase() === (csfObj.rfc || '').toUpperCase());
+          if (existingIndex >= 0) {
+            savedClients[existingIndex].csfData = csfObj;
+            if (csfObj.domicilio) savedClients[existingIndex].domicilio = csfObj.domicilio;
+            if (csfObj.curp) savedClients[existingIndex].curp = csfObj.curp;
+            saveClients(savedClients);
+          }
+        } catch (saveErr) {
+          console.error('Error al guardar datos de CSF en perfil de cliente:', saveErr);
+        }
+
+        if (data.pdfBase64) {
+          const b64 = data.pdfBase64.replace(/^data:application\/pdf;base64,/, '');
+          const binaryString = atob(b64);
+          const bytes = new Uint8Array(binaryString.length);
+          for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+          }
+          pdfBlob = new Blob([bytes], { type: 'application/pdf' });
+        } else {
+          // Procesar el binario / datos para generar el Blob PDF descargable
+          pdfBlob = await generateCsfPdfBlob(csfObj);
+        }
+      }
+
+      // Procesar binario y generar enlace de descarga directa en el navegador
+      const blobUrl = URL.createObjectURL(pdfBlob);
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      const cleanRfc = (csfObj?.rfc || fiel.rfc || 'SAT').toUpperCase().trim();
+      link.download = `Constancia_Situacion_Fiscal_${cleanRfc}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(blobUrl);
+
+      setSuccessMessage(`¡Constancia de Situación Fiscal (CSF) procesada con csf-sat-scraper y descargada en PDF exitosamente!`);
+    } catch (err: any) {
+      console.error('Error en handleObtenerYDescargarCsfConScraper:', err);
+      setErrorMessage(err.message || formatFetchError(err));
+    } finally {
+      setIsConsultingScraperCsf(false);
+    }
+  };
+
+  const handleScrapeCsf = async (customInput?: string) => {
+    setErrorMessage('');
+    setSuccessMessage('');
+
+    const targetInput = customInput || csfScraperInput || fiel.rfc;
+    if (!targetInput || !targetInput.trim()) {
+      setErrorMessage('Por favor ingrese la URL de la Cédula de Identificación Fiscal, el enlace QR del SAT o idCIF_RFC.');
+      return;
+    }
+
+    setIsConsultingScraperCsf(true);
+    try {
+      const res = await fetch('/api/sat/csf-scraper', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input: targetInput.trim(), rfc: fiel.rfc || undefined })
+      });
+
+      const data = await parseResponseJson(res);
+      if (data.csf) {
+        setCsfScraperData(data.csf);
+        setSuccessMessage(`¡Constancia de Situación Fiscal (CSF) obtenida vía Scraper SAT para ${data.csf.nombreCompleto} (${data.csf.rfc})!`);
+        
+        // Save real extracted CSF data into saved client profile if present
+        try {
+          const savedClients = getSavedClients();
+          const existingIndex = savedClients.findIndex(c => c.rfc.toUpperCase() === data.csf.rfc.toUpperCase());
+          if (existingIndex >= 0) {
+            savedClients[existingIndex].csfData = data.csf;
+            if (data.csf.domicilio) savedClients[existingIndex].domicilio = data.csf.domicilio;
+            if (data.csf.curp) savedClients[existingIndex].curp = data.csf.curp;
+            saveClients(savedClients);
+          }
+        } catch (saveErr) {
+          console.error('Error saving CSF data into client profile:', saveErr);
+        }
+      } else {
+        setCsfScraperData(data);
+        setSuccessMessage('¡Constancia obtenida exitosamente!');
+      }
+    } catch (err: any) {
+      console.error(err);
+      setErrorMessage(formatFetchError(err));
+    } finally {
+      setIsConsultingScraperCsf(false);
+    }
+  };
 
   const handleConsultarCsf = async () => {
     setErrorMessage('');
@@ -353,6 +518,13 @@ export function SatWebService() {
   const [searchFacturaText, setSearchFacturaText] = useState('');
   const [autoPollActive, setAutoPollActive] = useState(false);
   const [selectedXmlModal, setSelectedXmlModal] = useState<{ fileName: string; content: string } | null>(null);
+  const [batchSyncInfo, setBatchSyncInfo] = useState<{
+    active: boolean;
+    currentLabel: string;
+    completedMonths: number;
+    totalMonths: number;
+    accumulatedCount: number;
+  } | null>(null);
 
   const handleDownloadAllZip = async () => {
     if (!facturasResult?.xmlFiles || facturasResult.xmlFiles.length === 0) return;
@@ -697,6 +869,37 @@ export function SatWebService() {
     }
   };
 
+  function splitDateRangeIntoMonths(startDateStr: string, endDateStr: string): { start: string; end: string; label: string }[] {
+    const start = new Date(startDateStr);
+    const end = new Date(endDateStr);
+
+    if (isNaN(start.getTime()) || isNaN(end.getTime()) || start > end) {
+      return [{ start: startDateStr, end: endDateStr, label: `${startDateStr} a ${endDateStr}` }];
+    }
+
+    const months: { start: string; end: string; label: string }[] = [];
+    let curr = new Date(start.getFullYear(), start.getMonth(), 1);
+    const monthNames = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
+
+    while (curr <= end) {
+      const monthStart = new Date(curr.getFullYear(), curr.getMonth(), 1);
+      const monthEnd = new Date(curr.getFullYear(), curr.getMonth() + 1, 0);
+
+      const actualStart = monthStart < start ? start : monthStart;
+      const actualEnd = monthEnd > end ? end : monthEnd;
+
+      const startYmd = actualStart.toISOString().split('T')[0];
+      const endYmd = actualEnd.toISOString().split('T')[0];
+      const label = `${monthNames[curr.getMonth()]} ${curr.getFullYear()}`;
+
+      months.push({ start: startYmd, end: endYmd, label });
+
+      curr = new Date(curr.getFullYear(), curr.getMonth() + 1, 1);
+    }
+
+    return months;
+  }
+
   const handleConsultarFacturas = async () => {
     setErrorMessage('');
     setSuccessMessage('');
@@ -720,6 +923,105 @@ export function SatWebService() {
     setIsConsultingFacturas(true);
     setFacturasResult(null);
 
+    const startD = new Date(facturaFilters.fecha_inicial);
+    const endD = new Date(facturaFilters.fecha_final);
+    const dayDiff = Math.round((endD.getTime() - startD.getTime()) / (1000 * 3600 * 24));
+
+    // If range spans > 35 days (e.g. full year 01/01/2024 to 31/12/2024), use batch multi-month sync
+    if (dayDiff > 35) {
+      const monthPeriods = splitDateRangeIntoMonths(facturaFilters.fecha_inicial, facturaFilters.fecha_final);
+      let allFacturas: any[] = [];
+      let allXmls: any[] = [];
+      let lastSolicitudId = '';
+
+      setBatchSyncInfo({
+        active: true,
+        currentLabel: monthPeriods[0].label,
+        completedMonths: 0,
+        totalMonths: monthPeriods.length,
+        accumulatedCount: 0
+      });
+
+      try {
+        for (let i = 0; i < monthPeriods.length; i++) {
+          const period = monthPeriods[i];
+          setBatchSyncInfo({
+            active: true,
+            currentLabel: period.label,
+            completedMonths: i,
+            totalMonths: monthPeriods.length,
+            accumulatedCount: allFacturas.length
+          });
+
+          const fd = getFormDataWithFiles();
+          fd.append('fecha_inicial', `${period.start}T00:00:00`);
+          fd.append('fecha_final', `${period.end}T23:59:59`);
+          fd.append('tipo', facturaFilters.tipo);
+          fd.append('tipoBusqueda', facturaFilters.tipoBusqueda);
+          fd.append('estatusFactura', facturaFilters.estatusFactura);
+          fd.append('descargaComprobantes', String(facturaFilters.descargaComprobantes));
+          fd.append('descargaPdfs', String(facturaFilters.descargaPdfs));
+
+          const res = await fetch('/api/sat/facfiel', {
+            method: 'POST',
+            body: fd
+          });
+
+          const data = await parseResponseJson(res);
+          if (data.idSolicitud) {
+            lastSolicitudId = data.idSolicitud;
+            registerSolicitudInHistory(data.idSolicitud, data.estadoSolicitud || 'Aceptada', data.facturas?.length);
+          }
+
+          if (data.facturas && data.facturas.length > 0) {
+            allFacturas.push(...data.facturas);
+            if (data.xmlFiles) allXmls.push(...data.xmlFiles);
+          } else if (data.idSolicitud && (data.estadoSolicitud === 'En Proceso' || data.estadoSolicitud === 'Aceptada')) {
+            // Quick poll up to 2 times for this month
+            for (let poll = 0; poll < 2; poll++) {
+              await new Promise(r => setTimeout(r, 1500));
+              const pollFd = getFormDataWithFiles();
+              pollFd.append('requestId', data.idSolicitud);
+              pollFd.append('fecha_inicial', `${period.start}T00:00:00`);
+              pollFd.append('fecha_final', `${period.end}T23:59:59`);
+              pollFd.append('tipo', facturaFilters.tipo);
+              pollFd.append('tipoBusqueda', facturaFilters.tipoBusqueda);
+              pollFd.append('estatusFactura', facturaFilters.estatusFactura);
+
+              const pollRes = await fetch('/api/sat/facfiel', { method: 'POST', body: pollFd });
+              const pollData = await parseResponseJson(pollRes);
+              if (pollData.facturas && pollData.facturas.length > 0) {
+                allFacturas.push(...pollData.facturas);
+                if (pollData.xmlFiles) allXmls.push(...pollData.xmlFiles);
+                registerSolicitudInHistory(data.idSolicitud, 'Terminada', pollData.facturas.length);
+                break;
+              }
+            }
+          }
+        }
+
+        setFacturasResult({
+          idSolicitud: lastSolicitudId || 'BATCH_ANUAL',
+          estadoSolicitud: 'Terminada',
+          facturas: allFacturas,
+          comprobantes: allFacturas,
+          xmlFiles: allXmls,
+          mensaje: `Sincronización del periodo (${facturaFilters.fecha_inicial} a ${facturaFilters.fecha_final}) completada. Se obtuvieron ${allFacturas.length} comprobantes en ${monthPeriods.length} sub-periodos.`
+        });
+
+        setSuccessMessage(`¡Sincronización del periodo (${facturaFilters.fecha_inicial} a ${facturaFilters.fecha_final}) completada! Se obtuvieron y procesaron ${allFacturas.length} comprobantes fiscales.`);
+      } catch (err: any) {
+        console.error(err);
+        setErrorMessage(formatFetchError(err));
+      } finally {
+        setBatchSyncInfo(null);
+        setIsConsultingFacturas(false);
+      }
+
+      return;
+    }
+
+    // Standard single range query (<= 35 days)
     try {
       const fd = getFormDataWithFiles();
       fd.append('fecha_inicial', `${facturaFilters.fecha_inicial}T00:00:00`);
@@ -1264,66 +1566,6 @@ export function SatWebService() {
         </button>
 
         <button
-          onClick={() => setActiveTab('csf')}
-          className={`flex items-center gap-2 px-4 py-3 rounded-xl font-bold text-sm whitespace-nowrap transition-all ${
-            activeTab === 'csf'
-              ? 'bg-indigo-600 text-white shadow-md shadow-indigo-100'
-              : 'text-slate-600 hover:bg-slate-100'
-          }`}
-        >
-          <Building2 className="w-4 h-4" />
-          Constancia CSF
-        </button>
-
-        <button
-          onClick={() => setActiveTab('oc')}
-          className={`flex items-center gap-2 px-4 py-3 rounded-xl font-bold text-sm whitespace-nowrap transition-all ${
-            activeTab === 'oc'
-              ? 'bg-indigo-600 text-white shadow-md shadow-indigo-100'
-              : 'text-slate-600 hover:bg-slate-100'
-          }`}
-        >
-          <ShieldCheck className="w-4 h-4" />
-          Opinión de Cumplimiento
-        </button>
-
-        <button
-          onClick={() => setActiveTab('solicita')}
-          className={`flex items-center gap-2 px-4 py-3 rounded-xl font-bold text-sm whitespace-nowrap transition-all ${
-            activeTab === 'solicita'
-              ? 'bg-indigo-600 text-white shadow-md shadow-indigo-100'
-              : 'text-slate-600 hover:bg-slate-100'
-          }`}
-        >
-          <Archive className="w-4 h-4" />
-          Descarga Masiva (WS)
-        </button>
-
-        <button
-          onClick={() => setActiveTab('efos')}
-          className={`flex items-center gap-2 px-4 py-3 rounded-xl font-bold text-sm whitespace-nowrap transition-all ${
-            activeTab === 'efos'
-              ? 'bg-indigo-600 text-white shadow-md shadow-indigo-100'
-              : 'text-slate-600 hover:bg-slate-100'
-          }`}
-        >
-          <ShieldAlert className="w-4 h-4" />
-          Lista Negra EFOS
-        </button>
-
-        <button
-          onClick={() => setActiveTab('info')}
-          className={`flex items-center gap-2 px-4 py-3 rounded-xl font-bold text-sm whitespace-nowrap transition-all ${
-            activeTab === 'info'
-              ? 'bg-indigo-600 text-white shadow-md shadow-indigo-100'
-              : 'text-slate-600 hover:bg-slate-100'
-          }`}
-        >
-          <Info className="w-4 h-4" />
-          Información Fiscal
-        </button>
-
-        <button
           onClick={() => setActiveTab('perfiles')}
           className={`flex items-center gap-2 px-4 py-3 rounded-xl font-bold text-sm whitespace-nowrap transition-all ${
             activeTab === 'perfiles'
@@ -1395,6 +1637,66 @@ export function SatWebService() {
                 </select>
               </div>
             </div>
+
+            {/* Quick Range Presets */}
+            <div className="flex flex-wrap items-center gap-2 pt-1 pb-1">
+              <span className="text-xs font-bold text-slate-500 mr-1">Rangos rápidos:</span>
+              <button
+                type="button"
+                onClick={() => setFacturaFilters({ ...facturaFilters, fecha_inicial: '2024-01-01', fecha_final: '2024-12-31' })}
+                className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition-all ${
+                  facturaFilters.fecha_inicial === '2024-01-01' && facturaFilters.fecha_final === '2024-12-31'
+                    ? 'bg-indigo-100 text-indigo-700 border-indigo-300'
+                    : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'
+                }`}
+              >
+                📅 Año 2024 (01/01/2024 - 31/12/2024)
+              </button>
+              <button
+                type="button"
+                onClick={() => setFacturaFilters({ ...facturaFilters, fecha_inicial: '2025-01-01', fecha_final: '2025-12-31' })}
+                className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition-all ${
+                  facturaFilters.fecha_inicial === '2025-01-01' && facturaFilters.fecha_final === '2025-12-31'
+                    ? 'bg-indigo-100 text-indigo-700 border-indigo-300'
+                    : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'
+                }`}
+              >
+                📅 Año 2025 (01/01/2025 - 31/12/2025)
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const now = new Date();
+                  const firstDay = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
+                  const today = now.toISOString().split('T')[0];
+                  setFacturaFilters({ ...facturaFilters, fecha_inicial: firstDay, fecha_final: today });
+                }}
+                className="px-2.5 py-1 rounded-lg text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 transition-all"
+              >
+                📅 Mes Actual
+              </button>
+            </div>
+
+            {batchSyncInfo?.active && (
+              <div className="p-4 rounded-xl bg-indigo-50 border border-indigo-200 space-y-2">
+                <div className="flex items-center justify-between text-xs font-bold text-indigo-950">
+                  <div className="flex items-center gap-2">
+                    <RefreshCw className="w-4 h-4 text-indigo-600 animate-spin" />
+                    <span>Sincronizando Anual por Meses ({batchSyncInfo.completedMonths + 1} de {batchSyncInfo.totalMonths}: {batchSyncInfo.currentLabel})</span>
+                  </div>
+                  <span>{Math.round(((batchSyncInfo.completedMonths) / batchSyncInfo.totalMonths) * 100)}%</span>
+                </div>
+                <div className="w-full bg-indigo-200/60 rounded-full h-2 overflow-hidden">
+                  <div
+                    className="bg-indigo-600 h-2 rounded-full transition-all duration-300"
+                    style={{ width: `${Math.max(5, Math.round(((batchSyncInfo.completedMonths) / batchSyncInfo.totalMonths) * 100))}%` }}
+                  />
+                </div>
+                <p className="text-[11px] text-indigo-700">
+                  Se han recuperado {batchSyncInfo.accumulatedCount} comprobante(s) hasta el momento. Cada mes se procesa individualmente de forma optimizada para evitar saturación y tiempos de espera en el SAT.
+                </p>
+              </div>
+            )}
 
             <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-2">
               <div className="flex items-center gap-6">
@@ -1723,382 +2025,13 @@ export function SatWebService() {
         </div>
       )}
 
-      {/* TAB 2: CONSTANCIA DE SITUACIÓN FISCAL */}
-      {activeTab === 'csf' && (
-        <div className="space-y-6">
-          <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm space-y-6">
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-              <div>
-                <h3 className="text-lg font-bold text-slate-900">Constancia de Situación Fiscal (CSF)</h3>
-                <p className="text-xs text-slate-500">Obtenga la constancia oficial del SAT en formato PDF actualizado.</p>
-              </div>
 
-              <button
-                onClick={handleConsultarCsf}
-                disabled={isConsultingCsf}
-                className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-sm shadow-md transition-all disabled:opacity-50"
-              >
-                {isConsultingCsf ? (
-                  <>
-                    <RefreshCw className="w-4 h-4 animate-spin" />
-                    Generando CSF...
-                  </>
-                ) : (
-                  <>
-                    <Download className="w-4 h-4" />
-                    Descargar Constancia CSF
-                  </>
-                )}
-              </button>
-            </div>
 
-            {csfPdfBlobUrl ? (
-              <div className="space-y-4">
-                <div className="flex items-center justify-between bg-emerald-50 border border-emerald-200 p-4 rounded-xl">
-                  <div className="flex items-center gap-2 text-emerald-800 text-xs font-bold">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-600" /> Constancia CSF lista para visualizar y descargar.
-                  </div>
-                  <a
-                    href={csfPdfBlobUrl}
-                    download={`Constancia_CSF_${fiel.rfc}.pdf`}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white text-xs font-bold rounded-lg shadow-sm hover:bg-emerald-700"
-                  >
-                    <Download className="w-3.5 h-3.5" /> Descargar PDF
-                  </a>
-                </div>
 
-                <div className="border border-slate-200 rounded-2xl overflow-hidden h-[600px]">
-                  <iframe src={csfPdfBlobUrl} className="w-full h-full" title="Constancia CSF" />
-                </div>
-              </div>
-            ) : csfDataResult ? (
-              <div className="space-y-4">
-                <div className="flex items-center justify-between bg-emerald-50 border border-emerald-200 p-4 rounded-xl">
-                  <div className="flex items-center gap-2 text-emerald-800 text-xs font-bold">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-600" /> Certificado e.firma verificado correctamente en el Web Service del SAT.
-                  </div>
-                </div>
 
-                <div className="bg-slate-900 text-slate-100 rounded-2xl p-6 font-mono text-xs overflow-auto max-h-[500px] border border-slate-800 shadow-inner">
-                  <div className="text-emerald-400 font-bold mb-3">✓ Estado de Certificación y Sincronización SAT</div>
-                  <pre>{JSON.stringify(csfDataResult, null, 2)}</pre>
-                </div>
-              </div>
-            ) : (
-              <div className="p-12 border-2 border-dashed border-slate-200 rounded-2xl text-center space-y-3 bg-slate-50/50">
-                <Building2 className="w-12 h-12 text-slate-300 mx-auto" />
-                <h4 className="text-sm font-bold text-slate-700">Sin Constancia Cargada</h4>
-                <p className="text-xs text-slate-500 max-w-md mx-auto">
-                  Presione el botón superior para autenticarse con sus archivos FIEL y consultar la información de su Constancia de Situación Fiscal.
-                </p>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
 
-      {/* TAB 3: OPINIÓN DE CUMPLIMIENTO */}
-      {activeTab === 'oc' && (
-        <div className="space-y-6">
-          <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm space-y-6">
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-              <div>
-                <h3 className="text-lg font-bold text-slate-900">Opinión de Cumplimiento de Obligaciones Fiscales</h3>
-                <p className="text-xs text-slate-500">Consulte el sentido de su Opinión emitida por el SAT (Positiva / Negativa) en PDF o estatus oficial.</p>
-              </div>
 
-              <button
-                onClick={handleConsultarOc}
-                disabled={isConsultingOc}
-                className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-sm shadow-md transition-all disabled:opacity-50"
-              >
-                {isConsultingOc ? (
-                  <>
-                    <RefreshCw className="w-4 h-4 animate-spin" />
-                    Consultando Opinión...
-                  </>
-                ) : (
-                  <>
-                    <ShieldCheck className="w-4 h-4" />
-                    Obtener Opinión de Cumplimiento
-                  </>
-                )}
-              </button>
-            </div>
 
-            {ocPdfBlobUrl ? (
-              <div className="space-y-4">
-                <div className="flex items-center justify-between bg-emerald-50 border border-emerald-200 p-4 rounded-xl">
-                  <div className="flex items-center gap-2 text-emerald-800 text-xs font-bold">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-600" /> Opinión de Cumplimiento lista.
-                  </div>
-                  <a
-                    href={ocPdfBlobUrl}
-                    download={`Opinion_Cumplimiento_${fiel.rfc}.pdf`}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white text-xs font-bold rounded-lg shadow-sm hover:bg-emerald-700"
-                  >
-                    <Download className="w-3.5 h-3.5" /> Descargar PDF
-                  </a>
-                </div>
-
-                <div className="border border-slate-200 rounded-2xl overflow-hidden h-[600px]">
-                  <iframe src={ocPdfBlobUrl} className="w-full h-full" title="Opinión de Cumplimiento" />
-                </div>
-              </div>
-            ) : ocDataResult ? (
-              <div className="space-y-4">
-                <div className="flex items-center justify-between bg-emerald-50 border border-emerald-200 p-4 rounded-xl">
-                  <div className="flex items-center gap-2 text-emerald-800 text-xs font-bold">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-600" /> Resultado de Opinión de Cumplimiento recibido del SAT.
-                  </div>
-                </div>
-
-                <div className="bg-slate-900 text-slate-100 rounded-2xl p-6 font-mono text-xs overflow-auto max-h-[500px] border border-slate-800 shadow-inner">
-                  <div className="text-emerald-400 font-bold mb-3">✓ Estatus de Opinión Fiscal</div>
-                  <pre>{JSON.stringify(ocDataResult, null, 2)}</pre>
-                </div>
-              </div>
-            ) : (
-              <div className="p-12 border-2 border-dashed border-slate-200 rounded-2xl text-center space-y-3 bg-slate-50/50">
-                <ShieldCheck className="w-12 h-12 text-slate-300 mx-auto" />
-                <h4 className="text-sm font-bold text-slate-700">Sin Opinión Consultada</h4>
-                <p className="text-xs text-slate-500 max-w-md mx-auto">
-                  Haga clic en el botón para firmar la solicitud con su FIEL y verificar el estado de opinión de obligaciones ante el SAT.
-                </p>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* TAB 4: DESCARGA MASIVA WEB SERVICE */}
-      {activeTab === 'solicita' && (
-        <div className="space-y-6">
-          <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm space-y-6">
-            <div className="border-b border-slate-100 pb-4">
-              <h3 className="text-lg font-bold text-slate-900">Descarga Masiva por Web Service SAT</h3>
-              <p className="text-xs text-slate-500">Envíe solicitudes de paquetes masivos de XML o Metadatos para periodos extensos.</p>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              <div className="space-y-1.5">
-                <label className="text-xs font-bold text-slate-700">Tipo de Comprobantes</label>
-                <select
-                  value={wsFilters.tipo}
-                  onChange={(e) => setWsFilters({ ...wsFilters, tipo: e.target.value as any })}
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm font-semibold bg-slate-50"
-                >
-                  <option value="recibidos">📥 Facturas Recibidas</option>
-                  <option value="emitidos">📤 Facturas Emitidas</option>
-                </select>
-              </div>
-
-              <div className="space-y-1.5">
-                <label className="text-xs font-bold text-slate-700">Fecha Inicial</label>
-                <input
-                  type="date"
-                  value={wsFilters.fecha_inicial}
-                  onChange={(e) => setWsFilters({ ...wsFilters, fecha_inicial: e.target.value })}
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm font-semibold bg-slate-50"
-                />
-              </div>
-
-              <div className="space-y-1.5">
-                <label className="text-xs font-bold text-slate-700">Fecha Final</label>
-                <input
-                  type="date"
-                  value={wsFilters.fecha_final}
-                  onChange={(e) => setWsFilters({ ...wsFilters, fecha_final: e.target.value })}
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm font-semibold bg-slate-50"
-                />
-              </div>
-
-              <div className="space-y-1.5">
-                <label className="text-xs font-bold text-slate-700">Tipo Búsqueda</label>
-                <select
-                  value={wsFilters.tipoBusqueda}
-                  onChange={(e) => setWsFilters({ ...wsFilters, tipoBusqueda: e.target.value as any })}
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm font-semibold bg-slate-50"
-                >
-                  <option value="CFDI">XML CFDI</option>
-                  <option value="Metadata">Metadatos</option>
-                </select>
-              </div>
-            </div>
-
-            <div className="flex justify-end pt-2">
-              <button
-                onClick={handleSolicitarWs}
-                disabled={isSolicitansoWs}
-                className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-sm shadow-md transition-all disabled:opacity-50"
-              >
-                {isSolicitansoWs ? (
-                  <>
-                    <RefreshCw className="w-4 h-4 animate-spin" />
-                    Enviando Solicitud al SAT...
-                  </>
-                ) : (
-                  <>
-                    <Archive className="w-4 h-4" />
-                    Solicitar Paquete Masivo al SAT
-                  </>
-                )}
-              </button>
-            </div>
-          </div>
-
-          {/* Solicitud History List */}
-          <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm space-y-4">
-            <h4 className="font-bold text-slate-900 text-base">Historial de Solicitudes Masivas</h4>
-
-            {solicitaHistory.length === 0 ? (
-              <p className="text-xs text-slate-500 py-4 text-center">No hay solicitudes registradas aún.</p>
-            ) : (
-              <div className="divide-y divide-slate-100">
-                {solicitaHistory.map((item) => (
-                  <div key={item.idSolicitud} className="py-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-xs font-bold text-slate-900">{item.idSolicitud}</span>
-                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${
-                          item.estado === 'Terminada' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'
-                        }`}>
-                          {item.estado}
-                        </span>
-                      </div>
-                      <p className="text-xs text-slate-500">
-                        {item.tipo.toUpperCase()} • {item.rangoFechas} • Envia: {item.fechaSolicitud}
-                      </p>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => handleVerificarWs(item.idSolicitud)}
-                        disabled={isVerificandoId === item.idSolicitud}
-                        className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50 font-bold text-xs inline-flex items-center gap-1.5"
-                      >
-                        {isVerificandoId === item.idSolicitud ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-                        Verificar Estatus
-                      </button>
-
-                      {item.paquetes.map((pkg) => (
-                        <button
-                          key={pkg}
-                          onClick={() => handleDescargarPaqueteWs(pkg)}
-                          disabled={isDescargandoPkg === pkg}
-                          className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs inline-flex items-center gap-1.5"
-                        >
-                          <Download className="w-3.5 h-3.5" />
-                          Descargar {pkg.substring(0, 8)}...
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Extracted XMLs view */}
-          {extractedXmls && (
-            <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm space-y-4">
-              <div className="flex items-center justify-between">
-                <h4 className="font-bold text-slate-900 text-base">Archivos XML Extraídos ({extractedXmls.length})</h4>
-                <button
-                  onClick={() => setExtractedXmls(null)}
-                  className="text-xs text-slate-500 hover:text-slate-700"
-                >
-                  Cerrar
-                </button>
-              </div>
-
-              <div className="divide-y divide-slate-100 max-h-80 overflow-y-auto">
-                {extractedXmls.map((xml, idx) => (
-                  <div key={idx} className="py-2.5 flex items-center justify-between text-xs">
-                    <span className="font-mono text-slate-700 truncate max-w-md">{xml.fileName}</span>
-                    <button
-                      onClick={() => downloadTextFile(xml.content, xml.fileName)}
-                      className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded font-semibold text-[11px] inline-flex items-center gap-1"
-                    >
-                      <Download className="w-3 h-3" /> Descargar XML
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* TAB 5: LISTA NEGRA EFOS */}
-      {activeTab === 'efos' && (
-        <div className="space-y-6">
-          <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm space-y-6">
-            <div>
-              <h3 className="text-lg font-bold text-slate-900">Consulta de Lista Negra EFOS (Artículo 69-B del CFF)</h3>
-              <p className="text-xs text-slate-500">Verifique si un RFC se encuentra listado como Empresa que Factura Operaciones Simuladas (Definitivo, Presunto o Desvirtuado).</p>
-            </div>
-
-            <div className="flex gap-3 max-w-xl">
-              <input
-                type="text"
-                placeholder="RFC a consultar (Ej. PEJU880101XXX)"
-                value={efosRfcInput}
-                onChange={(e) => setEfosRfcInput(e.target.value.toUpperCase())}
-                className="flex-1 px-4 py-2.5 rounded-xl border border-slate-300 font-mono font-bold text-sm uppercase"
-              />
-              <button
-                onClick={handleConsultarEfos}
-                disabled={isConsultingEfos || !efosRfcInput.trim()}
-                className="px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-sm inline-flex items-center gap-2 disabled:opacity-50"
-              >
-                {isConsultingEfos ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
-                Consultar RFC
-              </button>
-            </div>
-
-            {efosResult && (
-              <div className="border border-slate-200 rounded-xl p-4 bg-slate-50 space-y-3">
-                <h4 className="font-bold text-slate-900 text-sm">Resultado EFOS para RFC: {efosRfcInput.toUpperCase()}</h4>
-                <pre className="p-3 bg-slate-900 text-emerald-400 font-mono text-xs overflow-auto rounded-lg">
-                  {JSON.stringify(efosResult, null, 2)}
-                </pre>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* TAB 6: INFORMACIÓN FISCAL */}
-      {activeTab === 'info' && (
-        <div className="space-y-6">
-          <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm space-y-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="text-lg font-bold text-slate-900">Información Fiscal Registrada ante el SAT</h3>
-                <p className="text-xs text-slate-500">Consulte régimen fiscal, domicilio, nombre fiscal y estatus del RFC.</p>
-              </div>
-
-              <button
-                onClick={handleConsultarInformacionFiscal}
-                disabled={isConsultingFiscal}
-                className="px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-sm inline-flex items-center gap-2 disabled:opacity-50"
-              >
-                {isConsultingFiscal ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Info className="w-4 h-4" />}
-                Consultar Info Fiscal
-              </button>
-            </div>
-
-            {fiscalInfoResult && (
-              <div className="border border-slate-200 rounded-xl p-4 bg-slate-50 space-y-3">
-                <pre className="p-3 bg-slate-900 text-emerald-400 font-mono text-xs overflow-auto rounded-lg">
-                  {JSON.stringify(fiscalInfoResult, null, 2)}
-                </pre>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
 
       {/* TAB 7: GUARDAR CREDENCIALES (FIEL / CIEC) */}
       {activeTab === 'perfiles' && (

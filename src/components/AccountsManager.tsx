@@ -29,6 +29,8 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { AncofiClient, fileToBase64, saveClients } from '../utils/profileHelpers';
+import { downloadCsfPdf, buildCsfDataFromClient, downloadClientCsfFileOrGeneratedPdf } from '../utils/csfPdfGenerator';
+
 
 interface AncofiUser {
   id: string;
@@ -90,6 +92,10 @@ export default function AccountsManager({
 
   // CIEC Credential
   const [newClientCiecPass, setNewClientCiecPass] = useState('');
+
+  // Official Constancia de Situación Fiscal PDF File
+  const [csfPdfFileName, setCsfPdfFileName] = useState('');
+  const [csfPdfBase64, setCsfPdfBase64] = useState('');
 
   // UI state
   const [showPass, setShowPass] = useState(false);
@@ -219,6 +225,8 @@ export default function AccountsManager({
     setKeyFileName('');
     setKeyBase64('');
     setNewClientCiecPass('');
+    setCsfPdfFileName('');
+    setCsfPdfBase64('');
     setClientFormError('');
     setClientSuccessMsg('');
     setShowAddClientModal(true);
@@ -238,6 +246,8 @@ export default function AccountsManager({
     setKeyFileName(client.keyFileName || '');
     setKeyBase64(client.keyBase64 || '');
     setNewClientCiecPass(client.ciecPassword || '');
+    setCsfPdfFileName(client.csfPdfFileName || '');
+    setCsfPdfBase64(client.csfPdfBase64 || '');
     setClientFormError('');
     setClientSuccessMsg('');
     setShowAddClientModal(true);
@@ -266,6 +276,8 @@ export default function AccountsManager({
       return;
     }
 
+    const existingClient = editingClientId ? clients.find(c => c.id === editingClientId) : undefined;
+
     const updatedClient: AncofiClient = {
       id: editingClientId || `client-${Date.now()}`,
       name: newClientName.trim(),
@@ -280,8 +292,12 @@ export default function AccountsManager({
       keyFileName: newClientAuthType === 'FIEL' ? keyFileName : undefined,
       keyBase64: newClientAuthType === 'FIEL' ? keyBase64 : undefined,
       ciecPassword: newClientAuthType === 'CIEC' ? newClientCiecPass : undefined,
+      csfPdfFileName: csfPdfFileName || existingClient?.csfPdfFileName,
+      csfPdfBase64: csfPdfBase64 || existingClient?.csfPdfBase64,
+      csfData: existingClient?.csfData,
+      domicilio: existingClient?.domicilio,
       registeredAt: editingClientId 
-        ? (clients.find(c => c.id === editingClientId)?.registeredAt || new Date().toISOString().substring(0, 10))
+        ? (existingClient?.registeredAt || new Date().toISOString().substring(0, 10))
         : new Date().toISOString().substring(0, 10)
     };
 
@@ -614,6 +630,15 @@ export default function AccountsManager({
                         </td>
                         <td className="py-4 px-6 text-right space-x-1.5">
                           <button
+                            onClick={() => {
+                              downloadClientCsfFileOrGeneratedPdf(client);
+                            }}
+                            className="p-1.5 rounded-lg border border-emerald-300 hover:border-emerald-400 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 shadow-sm transition-all focus:outline-none cursor-pointer active:scale-90 inline-flex items-center gap-1 text-[11px] font-bold px-2.5"
+                            title="Descargar Constancia de Situación Fiscal (CSF) oficial en PDF"
+                          >
+                            <FileText className="w-3.5 h-3.5 text-emerald-600" /> Constancia CSF PDF
+                          </button>
+                          <button
                             onClick={() => openEditClientModal(client)}
                             className="p-1.5 rounded-lg border border-indigo-200 hover:border-indigo-300 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 shadow-sm transition-all focus:outline-none cursor-pointer active:scale-90 inline-flex items-center gap-1 text-[11px] font-bold px-2.5"
                             title="Editar Perfil y Credenciales SAT"
@@ -867,6 +892,41 @@ export default function AccountsManager({
                       className="block w-full pl-9 pr-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:border-amber-500 focus:bg-white focus:outline-none transition-all placeholder-slate-400 text-slate-800 shadow-inner"
                     />
                   </div>
+                </div>
+
+                {/* Constancia CSF PDF Upload Field */}
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
+                  <label className="text-[11px] font-mono uppercase tracking-wider text-slate-700 font-bold block flex items-center gap-1.5">
+                    <FileText className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Constancia de Situación Fiscal (.pdf) Oficial</span>
+                  </label>
+                  <input
+                    type="file"
+                    accept="application/pdf"
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        try {
+                          const b64 = await fileToBase64(file);
+                          setCsfPdfFileName(file.name);
+                          setCsfPdfBase64(b64);
+                        } catch (err) {
+                          console.error('Error al cargar PDF de Constancia:', err);
+                        }
+                      }
+                    }}
+                    className="block w-full text-xs text-slate-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-emerald-100 file:text-emerald-800 hover:file:bg-emerald-200 cursor-pointer"
+                  />
+                  {csfPdfFileName ? (
+                    <p className="text-[10px] text-emerald-700 font-mono font-bold flex items-center gap-1">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                      Archivo PDF original adjunto: {csfPdfFileName}
+                    </p>
+                  ) : (
+                    <p className="text-[10px] text-slate-400 italic">
+                      Adjunte el PDF oficial expedido por el SAT para que al hacer clic en "Descargar Constancia" se descargue exactamente su documento oficial original.
+                    </p>
+                  )}
                 </div>
 
                 <div className="pt-3 border-t border-slate-100 flex gap-2">

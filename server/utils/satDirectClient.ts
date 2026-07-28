@@ -17,7 +17,7 @@ import {
 import AdmZip from 'adm-zip';
 
 export class SafeHttpsWebClient extends HttpsWebClient {
-  constructor(timeoutMs = 45000) {
+  constructor(timeoutMs = 12000) {
     super(undefined, undefined, timeoutMs);
   }
 
@@ -478,26 +478,30 @@ export async function consultarFacturasFielDirect(
     throw new Error('No se obtuvo un ID de solicitud del SAT.');
   }
 
-  // Polling loop: SAT Web Service generates packages asynchronously.
-  // Retry 'verify' up to 6 times with a delay (~20-22 seconds total)
+  // Fast non-blocking status check: SAT generates packages asynchronously.
+  // Perform 1 or 2 quick checks (max ~1-2 seconds total) to prevent serverless FUNCTION_INVOCATION_TIMEOUT
   let verifyRes: any = null;
-  const maxAttempts = 6;
+  const maxAttempts = options.requestId ? 2 : 1;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     console.log(`[SAT Direct] Verificando solicitud ${requestId} (intento ${attempt}/${maxAttempts})...`);
-    verifyRes = await verificaSolicitudDirect(creds, requestId);
+    try {
+      verifyRes = await verificaSolicitudDirect(creds, requestId);
+    } catch (errVer) {
+      console.warn(`[SAT Direct] Error en intento ${attempt} de verificaSolicitudDirect:`, errVer);
+    }
 
-    if (verifyRes.idsPaquetes && verifyRes.idsPaquetes.length > 0) {
+    if (verifyRes?.idsPaquetes && verifyRes.idsPaquetes.length > 0) {
       console.log(`[SAT Direct] ¡Paquetes del SAT listos! Paquetes:`, verifyRes.idsPaquetes);
       break;
     }
 
-    const estadoNum = Number(verifyRes.estadoSolicitud);
+    const estadoNum = Number(verifyRes?.estadoSolicitud);
     if (estadoNum >= 3) {
       break;
     }
 
     if (attempt < maxAttempts) {
-      await new Promise(r => setTimeout(r, 3500));
+      await new Promise(r => setTimeout(r, 1000));
     }
   }
 

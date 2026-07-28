@@ -5,6 +5,7 @@ export interface AncofiClient {
   regimen?: string;
   email: string;
   phone?: string; // Número de celular
+  curp?: string;
   authType?: 'FIEL' | 'CIEC'; // Método guardado
   fielPassword?: string;
   cerFileName?: string;
@@ -12,6 +13,21 @@ export interface AncofiClient {
   keyFileName?: string;
   keyBase64?: string;
   ciecPassword?: string;
+  // Official Constancia de Situación Fiscal PDF & Data
+  csfPdfFileName?: string;
+  csfPdfBase64?: string;
+  csfData?: any;
+  domicilio?: {
+    codigoPostal?: string;
+    tipoVialidad?: string;
+    nombreVialidad?: string;
+    numeroExterior?: string;
+    numeroInterior?: string;
+    colonia?: string;
+    municipio?: string;
+    entidadFederativa?: string;
+    domicilioCompleto?: string;
+  };
   registeredAt: string;
 }
 

@@ -29,7 +29,7 @@ app.use('/api/bank', bankRouter);
 
 // Direct API endpoint aliases (with and without /api)
 const satDirectEndpoints = [
-  '/csffiel', '/consultar-csffiel', '/ocfiel', '/consultar-ocfiel',
+  '/csffiel', '/consultar-csffiel', '/csf-scraper', '/consultar-csf-scraper', '/ocfiel', '/consultar-ocfiel',
   '/facfiel', '/consultar-facfiel', '/retencionfiel', '/informacionfiscalfiel',
   '/solicita', '/verifica', '/descarga', '/createkey', '/create-key'
 ];

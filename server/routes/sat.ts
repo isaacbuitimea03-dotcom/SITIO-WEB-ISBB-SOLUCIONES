@@ -9,6 +9,7 @@ import {
   consultarEfosDirect,
   FielCredentials
 } from '../utils/satDirectClient.js';
+import { scrapeCsfFromSat, extractCifParams } from '../utils/csfScraper.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -51,9 +52,78 @@ const fielUpload = upload.fields([
   { name: 'Certificado', maxCount: 1 }
 ]);
 
-// 1. Constancia de Situación Fiscal (CSF)
+// 0. Scraper de Constancia de Situación Fiscal (phpcfdi/csf-sat-scraper inspired)
+router.post(['/csf-scraper', '/consultar-csf-scraper'], async (req: Request, res: Response) => {
+  try {
+    const input = req.body.url || req.body.input || req.body.qrUrl || req.body.idCIF;
+    const directRfc = req.body.rfc;
+
+    let idCIF = req.body.idCIF;
+    let rfc = directRfc;
+
+    if (input) {
+      try {
+        const extracted = extractCifParams(String(input));
+        idCIF = extracted.idCIF;
+        if (!rfc) rfc = extracted.rfc;
+      } catch (err: any) {
+        if (!idCIF) throw err;
+      }
+    }
+
+    if (!idCIF || !rfc) {
+      return res.status(400).json({
+        error: 'Se requiere la URL de la Cédula de Identificación Fiscal, el enlace QR del SAT o los parámetros idCIF y RFC.'
+      });
+    }
+
+    const csfData = await scrapeCsfFromSat(String(idCIF), String(rfc));
+    return res.json({
+      success: true,
+      mensaje: `Constancia de Situación Fiscal obtenida exitosamente para el RFC ${csfData.rfc}.`,
+      rfc: csfData.rfc,
+      csf: csfData,
+      info: {
+        rfc: csfData.rfc,
+        razonSocial: csfData.nombreCompleto,
+        tipoPersona: csfData.tipoPersona,
+        estatus: csfData.estatusPadron,
+        domicilio: csfData.domicilio.domicilioCompleto,
+        regimenes: csfData.regimenes
+      }
+    });
+  } catch (error: any) {
+    console.error('[SAT ROUTE] Error en csf-scraper:', error);
+    return res.status(400).json({
+      error: error?.message || 'Error al obtener la Constancia de Situación Fiscal vía Scraper del SAT.'
+    });
+  }
+});
+
+// 1. Constancia de Situación Fiscal (CSF) vía FIEL / Scraper
 router.post(['/csffiel', '/consultar-csffiel'], fielUpload, async (req: Request, res: Response) => {
   try {
+    // Check if URL/idCIF was provided for scraper mode
+    const urlInput = req.body.url || req.body.input || req.body.qrUrl;
+    if (urlInput) {
+      const extracted = extractCifParams(String(urlInput));
+      const csfData = await scrapeCsfFromSat(extracted.idCIF, extracted.rfc);
+      return res.json({
+        success: true,
+        rfc: csfData.rfc,
+        mensaje: `Constancia de Situación Fiscal obtenida vía SAT Scraper para el RFC ${csfData.rfc}.`,
+        csf: csfData,
+        info: {
+          rfc: csfData.rfc,
+          razonSocial: csfData.nombreCompleto,
+          tipoPersona: csfData.tipoPersona,
+          estatus: csfData.estatusPadron,
+          domicilio: csfData.domicilio.domicilioCompleto,
+          regimenes: csfData.regimenes
+        }
+      });
+    }
+
     const creds = getCredentials(req);
     const info = await consultarInformacionFiscalDirect(creds);
     res.json({
