@@ -42,10 +42,27 @@ satDirectEndpoints.forEach(ep => {
 app.use(['/analyze-tax-ai', '/analyze-xml-ai', '/api/analyze-tax-ai', '/api/analyze-xml-ai'], aiRouter);
 app.use(['/analyze-pdf-statement', '/api/analyze-pdf-statement'], bankRouter);
 
-// Catch-all for unmatched /api/* routes to guarantee 404 JSON response
-app.all('/api/*', (req: Request, res: Response) => {
-  res.setHeader('Content-Type', 'application/json');
-  res.status(404).json({ error: `Ruta de API no encontrada: ${req.method} ${req.path}` });
+// Catch-all middleware for unmatched API routes or direct API aliases
+// Guarantees JSON 404 response and PREVENTS falling through to Vite/static index.html
+app.use((req: Request, res: Response, next: any) => {
+  const url = req.originalUrl || req.url || '';
+  const pathName = req.path || '';
+
+  const isApi = url.startsWith('/api') ||
+                pathName.startsWith('/api') ||
+                satDirectEndpoints.some(ep => pathName === ep || pathName.startsWith(`${ep}/`) || url === ep || url.startsWith(`${ep}/`)) ||
+                pathName.startsWith('/analyze-tax-ai') ||
+                pathName.startsWith('/analyze-xml-ai') ||
+                pathName.startsWith('/analyze-pdf-statement');
+
+  if (isApi) {
+    res.setHeader('Content-Type', 'application/json');
+    return res.status(404).json({
+      error: `Ruta de API no encontrada o método no permitido: ${req.method} ${pathName}`
+    });
+  }
+
+  next();
 });
 
 // Global error handling middleware for API routes to guarantee JSON response

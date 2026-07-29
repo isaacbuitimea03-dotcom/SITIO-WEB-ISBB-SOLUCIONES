@@ -1693,7 +1693,11 @@ export default function App() {
       setAuditResult(data.response || data.result || 'Auditoría completada.');
     } catch (error: any) {
       console.error('AI XML audit error:', error);
-      setAuditResult(`⚠️ Error: ${error.message || 'La auditoría con Inteligencia Artificial no pudo procesarse.'}`);
+      let errMsg = error?.message || 'La auditoría con Inteligencia Artificial no pudo procesarse.';
+      if (errMsg.includes('Failed to fetch') || errMsg.includes('fetch failed') || errMsg.includes('NetworkError')) {
+        errMsg = 'Error de conexión con el servidor API (Failed to fetch). Verifique su conexión e intente nuevamente.';
+      }
+      setAuditResult(`⚠️ Error: ${errMsg}`);
     } finally {
       setAuditing(false);
     }

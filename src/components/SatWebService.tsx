@@ -153,13 +153,39 @@ export function SatWebService() {
     if (!err) return 'Ocurrió un error inesperado de comunicación.';
     let msg = typeof err === 'string' ? err : (err.message || String(err));
     msg = msg.trim();
-    if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('fetch failed')) {
-      return 'Error de conexión con el servidor. Compruebe su conexión a internet o reintente la operación.';
+    if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('fetch failed') || msg.includes('Load failed')) {
+      return 'Error de comunicación con el servidor API (Failed to fetch). Verifique su conexión a internet o reintente la solicitud en un momento.';
     }
-    if (msg.startsWith('<!doctype') || msg.startsWith('<html') || msg.includes('<!DOCTYPE html>')) {
-      return 'El servidor del SAT respondió con un formato de respuesta no esperado. Por favor reintente en un momento.';
+    if (msg.startsWith('<!doctype') || msg.startsWith('<html') || msg.includes('<!DOCTYPE html>') || msg.includes('página HTML')) {
+      return 'El servidor devolvió un formato de respuesta no esperado. Por favor reintente la operación en un momento.';
     }
     return msg;
+  };
+
+  // Helper for fetching with 1 automatic retry on transient network errors
+  const fetchWithRetry = async (url: string, options?: RequestInit, maxRetries = 1, delayMs = 1000): Promise<Response> => {
+    let lastError: any = null;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const res = await fetch(url, options);
+        return res;
+      } catch (err: any) {
+        lastError = err;
+        const msg = String(err?.message || '');
+        const isNetworkOrTimeout = err?.name === 'TypeError' ||
+                                   msg.includes('Failed to fetch') ||
+                                   msg.includes('fetch failed') ||
+                                   msg.includes('NetworkError') ||
+                                   msg.includes('Load failed');
+        if (isNetworkOrTimeout && attempt < maxRetries) {
+          console.warn(`[fetchWithRetry] Transient network error on attempt ${attempt + 1}/${maxRetries + 1} for ${url}, retrying in ${delayMs}ms...`);
+          await new Promise(r => setTimeout(r, delayMs));
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw lastError;
   };
 
   const scrollToFielSection = () => {
@@ -271,7 +297,7 @@ export function SatWebService() {
 
     setIsConsultingScraperCsf(true);
     try {
-      const res = await fetch('/api/sat/csf-scraper', {
+      const res = await fetchWithRetry('/api/sat/csf-scraper', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -341,7 +367,7 @@ export function SatWebService() {
       setSuccessMessage(`¡Constancia de Situación Fiscal (CSF) procesada con csf-sat-scraper y descargada en PDF exitosamente!`);
     } catch (err: any) {
       console.error('Error en handleObtenerYDescargarCsfConScraper:', err);
-      setErrorMessage(err.message || formatFetchError(err));
+      setErrorMessage(formatFetchError(err));
     } finally {
       setIsConsultingScraperCsf(false);
     }
@@ -359,7 +385,7 @@ export function SatWebService() {
 
     setIsConsultingScraperCsf(true);
     try {
-      const res = await fetch('/api/sat/csf-scraper', {
+      const res = await fetchWithRetry('/api/sat/csf-scraper', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ input: targetInput.trim(), rfc: fiel.rfc || undefined })
@@ -418,7 +444,7 @@ export function SatWebService() {
     setIsConsultingCsf(true);
     try {
       const fd = getFormDataWithFiles();
-      const res = await fetch('/api/sat/csffiel', {
+      const res = await fetchWithRetry('/api/sat/csffiel', {
         method: 'POST',
         body: fd
       });
@@ -474,7 +500,7 @@ export function SatWebService() {
     setIsConsultingOc(true);
     try {
       const fd = getFormDataWithFiles();
-      const res = await fetch('/api/sat/ocfiel', {
+      const res = await fetchWithRetry('/api/sat/ocfiel', {
         method: 'POST',
         body: fd
       });
@@ -836,7 +862,7 @@ export function SatWebService() {
       fd.append('tipoBusqueda', facturaFilters.tipoBusqueda);
       fd.append('estatusFactura', facturaFilters.estatusFactura);
 
-      const res = await fetch('/api/sat/facfiel', {
+      const res = await fetchWithRetry('/api/sat/facfiel', {
         method: 'POST',
         body: fd
       });
@@ -870,34 +896,51 @@ export function SatWebService() {
   };
 
   function splitDateRangeIntoMonths(startDateStr: string, endDateStr: string): { start: string; end: string; label: string }[] {
-    const start = new Date(startDateStr);
-    const end = new Date(endDateStr);
+    let s = startDateStr;
+    let e = endDateStr;
 
-    if (isNaN(start.getTime()) || isNaN(end.getTime()) || start > end) {
-      return [{ start: startDateStr, end: endDateStr, label: `${startDateStr} a ${endDateStr}` }];
+    if (s > e) {
+      s = endDateStr;
+      e = startDateStr;
     }
+
+    const [sY, sM, sD] = s.split('-').map(Number);
+    const [eY, eM, eD] = e.split('-').map(Number);
+
+    if (!sY || !sM || !sD || !eY || !eM || !eD) {
+      return [{ start: s, end: e, label: `${s} a ${e}` }];
+    }
+
+    const monthNames = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
+    const pad = (n: number) => String(n).padStart(2, '0');
 
     const months: { start: string; end: string; label: string }[] = [];
-    let curr = new Date(start.getFullYear(), start.getMonth(), 1);
-    const monthNames = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
 
-    while (curr <= end) {
-      const monthStart = new Date(curr.getFullYear(), curr.getMonth(), 1);
-      const monthEnd = new Date(curr.getFullYear(), curr.getMonth() + 1, 0);
+    let currY = sY;
+    let currM = sM;
 
-      const actualStart = monthStart < start ? start : monthStart;
-      const actualEnd = monthEnd > end ? end : monthEnd;
+    while (currY < eY || (currY === eY && currM <= eM)) {
+      const startDay = (currY === sY && currM === sM) ? sD : 1;
+      const maxDaysInMonth = new Date(currY, currM, 0).getDate();
+      const endDay = (currY === eY && currM === eM) ? Math.min(eD, maxDaysInMonth) : maxDaysInMonth;
 
-      const startYmd = actualStart.toISOString().split('T')[0];
-      const endYmd = actualEnd.toISOString().split('T')[0];
-      const label = `${monthNames[curr.getMonth()]} ${curr.getFullYear()}`;
+      const validStartDay = Math.min(startDay, maxDaysInMonth);
+      const validEndDay = Math.max(validStartDay, endDay);
 
-      months.push({ start: startYmd, end: endYmd, label });
+      const periodStart = `${currY}-${pad(currM)}-${pad(validStartDay)}`;
+      const periodEnd = `${currY}-${pad(currM)}-${pad(validEndDay)}`;
+      const label = `${monthNames[currM - 1]} ${currY}`;
 
-      curr = new Date(curr.getFullYear(), curr.getMonth() + 1, 1);
+      months.push({ start: periodStart, end: periodEnd, label });
+
+      currM++;
+      if (currM > 12) {
+        currM = 1;
+        currY++;
+      }
     }
 
-    return months;
+    return months.length > 0 ? months : [{ start: s, end: e, label: `${s} a ${e}` }];
   }
 
   const handleConsultarFacturas = async () => {
@@ -920,16 +963,26 @@ export function SatWebService() {
       return;
     }
 
+    // Auto-correct inverted dates if user accidentally selected end date before start date
+    let fStart = facturaFilters.fecha_inicial;
+    let fEnd = facturaFilters.fecha_final;
+    if (fStart > fEnd) {
+      const tmp = fStart;
+      fStart = fEnd;
+      fEnd = tmp;
+      setFacturaFilters({ ...facturaFilters, fecha_inicial: fStart, fecha_final: fEnd });
+    }
+
     setIsConsultingFacturas(true);
     setFacturasResult(null);
 
-    const startD = new Date(facturaFilters.fecha_inicial);
-    const endD = new Date(facturaFilters.fecha_final);
+    const startD = new Date(fStart);
+    const endD = new Date(fEnd);
     const dayDiff = Math.round((endD.getTime() - startD.getTime()) / (1000 * 3600 * 24));
 
     // If range spans > 35 days (e.g. full year 01/01/2024 to 31/12/2024), use batch multi-month sync
     if (dayDiff > 35) {
-      const monthPeriods = splitDateRangeIntoMonths(facturaFilters.fecha_inicial, facturaFilters.fecha_final);
+      const monthPeriods = splitDateRangeIntoMonths(fStart, fEnd);
       let allFacturas: any[] = [];
       let allXmls: any[] = [];
       let lastSolicitudId = '';
@@ -943,7 +996,7 @@ export function SatWebService() {
       });
 
       try {
-        const CONCURRENCY = 3;
+        const CONCURRENCY = 1; // Sequential execution to prevent SAT 5005 ("solicitud en proceso") collisions
         let completedCount = 0;
 
         const fetchPeriod = async (period: { start: string; end: string; label: string }) => {
@@ -956,32 +1009,50 @@ export function SatWebService() {
           fd.append('descargaComprobantes', String(facturaFilters.descargaComprobantes));
           fd.append('descargaPdfs', String(facturaFilters.descargaPdfs));
 
-          const res = await fetch('/api/sat/facfiel', {
+          const res = await fetchWithRetry('/api/sat/facfiel', {
             method: 'POST',
             body: fd
           });
 
-          const data = await parseResponseJson(res);
+          let currentData = await parseResponseJson(res);
 
-          // Quick poll if needed
-          if ((!data.facturas || data.facturas.length === 0) && data.idSolicitud && (data.estadoSolicitud === 'En Proceso' || data.estadoSolicitud === 'Aceptada')) {
-            await new Promise(r => setTimeout(r, 1000));
+          // Poll up to 8 attempts (~16s) if SAT is processing asynchronously
+          let pollAttempts = 0;
+          while (
+            (!currentData.facturas || currentData.facturas.length === 0) &&
+            currentData.idSolicitud &&
+            (currentData.estadoSolicitud === 'En Proceso' || currentData.estadoSolicitud === 'Aceptada') &&
+            pollAttempts < 8
+          ) {
+            pollAttempts++;
+            await new Promise(r => setTimeout(r, 2000));
+
             const pollFd = getFormDataWithFiles();
-            pollFd.append('requestId', data.idSolicitud);
+            pollFd.append('requestId', currentData.idSolicitud);
             pollFd.append('fecha_inicial', `${period.start}T00:00:00`);
             pollFd.append('fecha_final', `${period.end}T23:59:59`);
             pollFd.append('tipo', facturaFilters.tipo);
             pollFd.append('tipoBusqueda', facturaFilters.tipoBusqueda);
             pollFd.append('estatusFactura', facturaFilters.estatusFactura);
 
-            const pollRes = await fetch('/api/sat/facfiel', { method: 'POST', body: pollFd });
-            const pollData = await parseResponseJson(pollRes);
-            if (pollData.facturas && pollData.facturas.length > 0) {
-              return pollData;
+            try {
+              const pollRes = await fetchWithRetry('/api/sat/facfiel', { method: 'POST', body: pollFd });
+              const pollData = await parseResponseJson(pollRes);
+              if (pollData) {
+                currentData = pollData;
+                if (currentData.facturas && currentData.facturas.length > 0) {
+                  break;
+                }
+                if (currentData.estadoSolicitud === 'Terminada' || currentData.estadoSolicitud === 'Rechazada') {
+                  break;
+                }
+              }
+            } catch (err) {
+              console.warn(`[SAT Poll Error] Intento ${pollAttempts} fallido para periodo ${period.label}:`, err);
             }
           }
 
-          return data;
+          return currentData;
         };
 
         for (let i = 0; i < monthPeriods.length; i += CONCURRENCY) {
@@ -999,11 +1070,25 @@ export function SatWebService() {
           const results = await Promise.all(
             chunk.map(p => fetchPeriod(p).catch(err => {
               console.warn('Error en periodo:', p.label, err);
-              return { error: err?.message };
+              return { error: formatFetchError(err) };
             }))
           );
 
           for (const data of results) {
+            if (data?.error) {
+              const errLower = String(data.error).toLowerCase();
+              if (
+                errLower.includes('contraseña') ||
+                errLower.includes('fiel') ||
+                errLower.includes('llave') ||
+                errLower.includes('certificado') ||
+                errLower.includes('private key') ||
+                errLower.includes('incorrecta')
+              ) {
+                throw new Error(data.error);
+              }
+            }
+
             if (data?.idSolicitud) {
               lastSolicitudId = data.idSolicitud;
               registerSolicitudInHistory(data.idSolicitud, data.estadoSolicitud || 'Aceptada', data.facturas?.length);
@@ -1024,7 +1109,7 @@ export function SatWebService() {
             facturas: [...allFacturas],
             comprobantes: [...allFacturas],
             xmlFiles: [...allXmls],
-            mensaje: `Cargando ultra-rápido... (${completedCount}/${monthPeriods.length} meses procesados - ${allFacturas.length} comprobantes encontrados)`
+            mensaje: `Procesando periodo... (${completedCount}/${monthPeriods.length} meses sincronizados - ${allFacturas.length} comprobantes encontrados)`
           });
 
           setBatchSyncInfo({
@@ -1034,6 +1119,11 @@ export function SatWebService() {
             totalMonths: monthPeriods.length,
             accumulatedCount: allFacturas.length
           });
+
+          // Small 600ms delay between sequential month requests to respect SAT rate limits
+          if (i + CONCURRENCY < monthPeriods.length) {
+            await new Promise(r => setTimeout(r, 600));
+          }
         }
 
         setFacturasResult({
@@ -1042,10 +1132,10 @@ export function SatWebService() {
           facturas: allFacturas,
           comprobantes: allFacturas,
           xmlFiles: allXmls,
-          mensaje: `Sincronización del periodo (${facturaFilters.fecha_inicial} a ${facturaFilters.fecha_final}) completada. Se obtuvieron ${allFacturas.length} comprobantes en ${monthPeriods.length} sub-periodos.`
+          mensaje: `Sincronización del periodo (${fStart} a ${fEnd}) completada. Se obtuvieron ${allFacturas.length} comprobantes en ${monthPeriods.length} sub-periodos.`
         });
 
-        setSuccessMessage(`¡Sincronización del periodo (${facturaFilters.fecha_inicial} a ${facturaFilters.fecha_final}) completada con éxito! Se obtuvieron ${allFacturas.length} comprobantes fiscales.`);
+        setSuccessMessage(`¡Sincronización del periodo (${fStart} a ${fEnd}) completada con éxito! Se obtuvieron ${allFacturas.length} comprobantes fiscales.`);
       } catch (err: any) {
         console.error(err);
         setErrorMessage(formatFetchError(err));
@@ -1060,15 +1150,15 @@ export function SatWebService() {
     // Standard single range query (<= 35 days)
     try {
       const fd = getFormDataWithFiles();
-      fd.append('fecha_inicial', `${facturaFilters.fecha_inicial}T00:00:00`);
-      fd.append('fecha_final', `${facturaFilters.fecha_final}T23:59:59`);
+      fd.append('fecha_inicial', `${fStart}T00:00:00`);
+      fd.append('fecha_final', `${fEnd}T23:59:59`);
       fd.append('tipo', facturaFilters.tipo);
       fd.append('tipoBusqueda', facturaFilters.tipoBusqueda);
       fd.append('estatusFactura', facturaFilters.estatusFactura);
       fd.append('descargaComprobantes', String(facturaFilters.descargaComprobantes));
       fd.append('descargaPdfs', String(facturaFilters.descargaPdfs));
 
-      const res = await fetch('/api/sat/facfiel', {
+      const res = await fetchWithRetry('/api/sat/facfiel', {
         method: 'POST',
         body: fd
       });
@@ -1175,7 +1265,7 @@ export function SatWebService() {
       fd.append('tipoBusqueda', wsFilters.tipoBusqueda);
       fd.append('estadoComprobante', wsFilters.estadoComprobante);
 
-      const res = await fetch('/api/sat/solicita', {
+      const res = await fetchWithRetry('/api/sat/solicita', {
         method: 'POST',
         body: fd
       });
@@ -1219,7 +1309,7 @@ export function SatWebService() {
       const fd = getFormDataWithFiles();
       fd.append('idSolicitud', idSolicitud);
 
-      const res = await fetch('/api/sat/verifica', {
+      const res = await fetchWithRetry('/api/sat/verifica', {
         method: 'POST',
         body: fd
       });
@@ -1266,7 +1356,7 @@ export function SatWebService() {
       const fd = getFormDataWithFiles();
       fd.append('idPaquete', idPaquete);
 
-      const res = await fetch('/api/sat/descarga', {
+      const res = await fetchWithRetry('/api/sat/descarga', {
         method: 'POST',
         body: fd
       });
@@ -1310,7 +1400,7 @@ export function SatWebService() {
     try {
       const headers: Record<string, string> = {};
 
-      const res = await fetch(`/api/sat/efos/${encodeURIComponent(efosRfcInput.trim().toUpperCase())}`, {
+      const res = await fetchWithRetry(`/api/sat/efos/${encodeURIComponent(efosRfcInput.trim().toUpperCase())}`, {
         headers
       });
 
@@ -1347,7 +1437,7 @@ export function SatWebService() {
 
     try {
       const fd = getFormDataWithFiles();
-      const res = await fetch('/api/sat/informacionfiscalfiel', {
+      const res = await fetchWithRetry('/api/sat/informacionfiscalfiel', {
         method: 'POST',
         body: fd
       });
@@ -1956,8 +2046,85 @@ export function SatWebService() {
                     </pre>
                   </details>
                 </div>
+              ) : facturasResult.estadoSolicitud === 'Terminada' ? (
+                /* CASE 3: Facturas array is empty and SAT completed query (0 facturas in range) */
+                <div className="space-y-6">
+                  <div className="p-6 rounded-2xl bg-slate-50 border border-slate-200 space-y-4 shadow-xs">
+                    <div className="flex items-start gap-3.5">
+                      <div className="p-3 rounded-2xl bg-indigo-50 text-indigo-700 shrink-0 mt-0.5 border border-indigo-100">
+                        <CheckCircle2 className="w-6 h-6 text-indigo-600" />
+                      </div>
+                      <div className="space-y-2 flex-1">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <h4 className="font-bold text-slate-900 text-base flex items-center gap-2">
+                            <span>Sincronización Concluida - Sin comprobantes en el periodo</span>
+                            <span className="px-2.5 py-0.5 rounded-full text-xs font-black bg-emerald-100 text-emerald-800 uppercase tracking-wider">
+                              Estatus SAT: Concluido
+                            </span>
+                          </h4>
+                        </div>
+
+                        <p className="text-xs text-slate-700 leading-relaxed font-medium">
+                          {facturasResult.mensaje || `El Web Service del SAT procesó el Folio de Solicitud ${facturasResult.idSolicitud || ''} y no encontró facturas ${facturaFilters.tipo === 'emitidos' ? 'emitidas' : 'recibidas'} para las fechas seleccionadas (${facturaFilters.fecha_inicial} a ${facturaFilters.fecha_final}).`}
+                        </p>
+
+                        <div className="bg-white p-3.5 rounded-xl border border-slate-200 text-xs text-slate-600 space-y-2">
+                          <div className="font-bold text-slate-800 flex items-center gap-1.5">
+                            <Zap className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+                            <span>Sugerencias para verificar su búsqueda:</span>
+                          </div>
+                          <ul className="list-disc list-inside space-y-1 text-[11px] text-slate-600 pl-1">
+                            <li>
+                              Actualmente consultó <strong>Facturas {facturaFilters.tipo === 'emitidos' ? 'Emitidas (sus ventas)' : 'Recibidas (sus gastos)'}</strong>. Si busca sus {facturaFilters.tipo === 'emitidos' ? 'gastos/compras' : 'ventas/ingresos'}, cambie el filtro a <strong>Facturas {facturaFilters.tipo === 'emitidos' ? 'Recibidas' : 'Emitidas'}</strong>.
+                            </li>
+                            <li>Verifique que la FIEL cargada (.cer / .key) corresponda exactamente al RFC de la empresa o contribuyente que emitió o recibió las facturas.</li>
+                            <li>Si busca facturas canceladas, asegúrese de seleccionar en "Estatus del CFDI" la opción "Todos los Estatus" o "Cancelados".</li>
+                          </ul>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="pt-3 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const newTipo = facturaFilters.tipo === 'recibidos' ? 'emitidos' : 'recibidos';
+                          setFacturaFilters(prev => ({ ...prev, tipo: newTipo }));
+                          setTimeout(() => handleConsultarFacturas(), 100);
+                        }}
+                        disabled={isConsultingFacturas}
+                        className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs inline-flex items-center gap-1.5 shadow-sm transition-all"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" /> Consultar Facturas {facturaFilters.tipo === 'recibidos' ? 'Emitidas' : 'Recibidas'}
+                      </button>
+
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setFacturaFilters(prev => ({ ...prev, tipoBusqueda: '2' }));
+                            setTimeout(() => handleConsultarFacturas(), 100);
+                          }}
+                          disabled={isConsultingFacturas}
+                          className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-900 text-white font-bold text-xs inline-flex items-center gap-1.5 transition-all"
+                        >
+                          <FileText className="w-3.5 h-3.5" /> Modo Metadata
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <details className="text-xs text-slate-500">
+                    <summary className="cursor-pointer font-semibold hover:text-slate-700 py-1">
+                      Ver detalle técnico de la respuesta del SAT
+                    </summary>
+                    <pre className="p-3 mt-2 bg-slate-900 text-emerald-400 font-mono text-[11px] overflow-auto max-h-48 rounded-xl">
+                      {JSON.stringify(facturasResult, null, 2)}
+                    </pre>
+                  </details>
+                </div>
               ) : (
-                /* CASE 3: Facturas array is empty, but idSolicitud is active/in process */
+                /* CASE 4: Facturas array is empty, but idSolicitud is active/in process */
                 <div className="space-y-6">
                   <div className="p-6 rounded-2xl bg-amber-50/90 border border-amber-200/90 space-y-4 shadow-xs">
                     <div className="flex items-start gap-3.5">

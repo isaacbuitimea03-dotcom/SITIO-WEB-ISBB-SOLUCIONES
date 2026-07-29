@@ -175,13 +175,19 @@ router.post(['/facfiel', '/consultar-facfiel'], fielUpload, async (req: Request,
       return res.status(400).json({ error: 'Proporcione el rango de fecha inicial y fecha final.' });
     }
 
+    const tb = String(tipoBusqueda || req.query.tipoBusqueda || '1');
+    const isMeta = solicitaMetadata === 'true' ||
+                   req.query.solicitaMetadata === 'true' ||
+                   tb === '2' ||
+                   tb === 'Metadata';
+
     const result = await consultarFacturasFielDirect(creds, {
-      tipo_busqueda: tipoBusqueda || req.query.tipoBusqueda || '1',
+      tipo_busqueda: tb,
       estatus_factura: estatusFactura || req.query.estatusFactura || '-1',
       fecha_inicial: String(fecha_inicial),
       fecha_final: String(fecha_final),
       tipo: String(tipo || req.query.tipo || 'recibidos'),
-      solicitaMetadata: solicitaMetadata === 'true' || req.query.solicitaMetadata === 'true',
+      solicitaMetadata: isMeta,
       descargaComprobantes: descargaComprobantes !== 'false' && req.query.descargaComprobantes !== 'false',
       requestId: requestId || req.query.requestId
     });
@@ -328,6 +334,14 @@ router.post(['/createkey', '/create-key'], async (_req: Request, res: Response) 
   res.json({
     success: true,
     message: 'Su aplicación utiliza conexión directa al Web Service oficial del SAT con @nodecfdi/sat-ws-descarga-masiva. No requiere token de API ni llaves de terceros.'
+  });
+});
+
+// Catch-all handler for any unmatched SAT routes or methods to guarantee JSON output
+router.all('*', (req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.status(404).json({
+    error: `Ruta de API del SAT no encontrada o método no permitido: ${req.method} ${req.path}`
   });
 });
 

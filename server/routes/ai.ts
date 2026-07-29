@@ -104,7 +104,7 @@ router.post('/analyze-tax-ai', async (req: Request, res: Response) => {
 // 2. Audit XML file lists using AI
 router.post('/analyze-xml-ai', async (req: Request, res: Response) => {
   try {
-    const { xmlMetadataList, query } = req.body;
+    const { xmlMetadataList, fileDetails, xmlSummary, query, regimen } = req.body;
 
     if (!process.env.GEMINI_API_KEY) {
       return res.status(500).json({ 
@@ -112,11 +112,21 @@ router.post('/analyze-xml-ai', async (req: Request, res: Response) => {
       });
     }
 
-    if (!xmlMetadataList || !Array.isArray(xmlMetadataList) || xmlMetadataList.length === 0) {
+    let itemsToAnalyze: any[] = [];
+    if (Array.isArray(xmlMetadataList) && xmlMetadataList.length > 0) {
+      itemsToAnalyze = xmlMetadataList;
+    } else if (Array.isArray(fileDetails) && fileDetails.length > 0) {
+      itemsToAnalyze = fileDetails;
+    } else if (xmlSummary && typeof xmlSummary === 'object') {
+      itemsToAnalyze = [xmlSummary];
+    }
+
+    if (itemsToAnalyze.length === 0) {
       return res.status(400).json({ error: 'No se proporcionaron datos de CFDIs para auditar.' });
     }
 
-    const systemInstruction = `Eres un Auditor Fiscal Experto de ISBB SOLUCIONES. Tu objetivo es realizar auditorías detalladas e identificar anomalías, riesgos de discrepancia fiscal, impuestos trasladados y retenidos incorrectamente, y optimización de deducciones basándote exclusivamente en la lista de metadatos de CFDIs (facturas XML del SAT) que el usuario te proporciona.
+    const systemInstruction = `Eres un Auditor Fiscal Experto de ISBB SOLUCIONES. Tu objetivo es realizar auditorías detalladas e identificar anomalías, riesgos de discrepancia fiscal, impuestos trasladados y retenidos incorrectamente, y optimización de deducciones basándote exclusivamente en los datos de CFDIs (facturas XML del SAT) que el usuario te proporciona.
+    ${regimen ? `Régimen Fiscal del contribuyente: ${regimen}` : ''}
     
     Realiza un análisis minucioso y profesional. Genera siempre secciones bien estructuradas en markdown:
     1. **Resumen Ejecutivo**: Principales métricas observadas (Ingresos vs Egresos de forma agregada).
@@ -124,26 +134,26 @@ router.post('/analyze-xml-ai', async (req: Request, res: Response) => {
     3. **Análisis de Impuestos**: Desglose de IVA (16%, 0%, exento), ISR retenido, etc.
     4. **Recomendaciones Contables**: Medidas preventivas inmediatas que la empresa o persona debe tomar de cara a una posible revisión del SAT.`;
 
-    const formattedData = xmlMetadataList.map((cfdi: any) => ({
-      folio: cfdi.folio || 'S/N',
-      fecha: cfdi.fecha || 'Sin fecha',
-      emisorRfc: cfdi.emisorRfc,
-      emisorNombre: cfdi.emisorNombre,
-      receptorRfc: cfdi.receptorRfc,
-      receptorNombre: cfdi.receptorNombre,
-      tipo: cfdi.tipo,
+    const formattedData = itemsToAnalyze.map((cfdi: any) => ({
+      folio: cfdi.folio || cfdi.folioSat || 'S/N',
+      fecha: cfdi.fecha || cfdi.fechaEmision || 'Sin fecha',
+      emisorRfc: cfdi.emisorRfc || cfdi.rfcEmisor,
+      emisorNombre: cfdi.emisorNombre || cfdi.nombreEmisor,
+      receptorRfc: cfdi.receptorRfc || cfdi.rfcReceptor,
+      receptorNombre: cfdi.receptorNombre || cfdi.nombreReceptor,
+      tipo: cfdi.tipo || cfdi.tipoComprobante,
       subTotal: cfdi.subTotal,
       descuento: cfdi.descuento,
       total: cfdi.total,
-      ivaTrasladado: cfdi.ivaTrasladado,
+      ivaTrasladado: cfdi.ivaTrasladado || cfdi.iva,
       ivaRetenido: cfdi.ivaRetenido,
       isrRetenido: cfdi.isrRetenido,
-      conceptos: cfdi.conceptos ? cfdi.conceptos.join(', ') : '',
+      conceptos: Array.isArray(cfdi.conceptos) ? cfdi.conceptos.join(', ') : (cfdi.conceptos || ''),
       usoCfdi: cfdi.usoCfdiDesc || cfdi.usoCfdi,
       formaPago: cfdi.formaPagoDesc || cfdi.formaPago
     }));
 
-    const prompt = `Por favor audita y analiza los siguientes metadatos de facturas SAT (CFDIs) y responde a la consulta del usuario.
+    const prompt = `Por favor audita y analiza los siguientes datos de facturas SAT (CFDIs) y responde a la consulta del usuario.
     
     ---
     CONSULTA DE USUARIO: ${query || 'Auditoría fiscal general de todos los comprobantes cargados.'}

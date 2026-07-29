@@ -22,16 +22,34 @@ export class SafeHttpsWebClient extends HttpsWebClient {
   }
 
   async call(request: CRequest): Promise<CResponse> {
-    try {
-      return await super.call(request);
-    } catch (error: any) {
-      if (!error || typeof error.getResponse !== 'function') {
-        const errMsg = error?.message || 'Error de comunicación con el servicio Web del SAT.';
-        const errorResponse = new CResponse(0, errMsg, {});
-        throw new WebClientException(errMsg, request, errorResponse);
+    let lastError: any = null;
+    for (let attempt = 0; attempt <= 1; attempt++) {
+      try {
+        return await super.call(request);
+      } catch (error: any) {
+        lastError = error;
+        const msg = String(error?.message || '');
+        const isTimeoutOrNetwork = msg.includes('Timeout') ||
+                                   msg.includes('timeout') ||
+                                   msg.includes('ECONNRESET') ||
+                                   msg.includes('ETIMEDOUT') ||
+                                   msg.includes('ENOTFOUND') ||
+                                   msg.includes('socket hung up');
+        if (isTimeoutOrNetwork && attempt < 1) {
+          console.warn(`[SafeHttpsWebClient] Reintento ${attempt + 1}/2 tras error de tiempo/red (${msg})`);
+          await new Promise(r => setTimeout(r, 600));
+          continue;
+        }
+        break;
       }
-      throw error;
     }
+
+    if (!lastError || typeof lastError.getResponse !== 'function') {
+      const errMsg = lastError?.message || 'Error de comunicación con el servicio Web del SAT.';
+      const errorResponse = new CResponse(0, errMsg, {});
+      throw new WebClientException(errMsg, request, errorResponse);
+    }
+    throw lastError;
   }
 }
 
@@ -50,44 +68,90 @@ export function createFielInstance(creds: FielCredentials): Fiel {
     throw new Error('La contraseña de la FIEL es requerida.');
   }
 
-  let certStr = creds.certificado.buffer.toString('utf8');
-  if (!certStr.includes('-----BEGIN CERTIFICATE-----')) {
-    certStr = creds.certificado.buffer.toString('binary');
-  }
+  const certBuf = creds.certificado.buffer;
+  const keyBuf = creds.llavePrivada.buffer;
 
-  let keyStr = creds.llavePrivada.buffer.toString('utf8');
-  if (!keyStr.includes('-----BEGIN') && !keyStr.includes('PRIVATE KEY')) {
-    keyStr = creds.llavePrivada.buffer.toString('binary');
-  }
+  const isCertPem = certBuf.toString('utf8', 0, 100).includes('-----BEGIN');
+  const certStr = isCertPem ? certBuf.toString('utf8') : certBuf.toString('binary');
 
-  try {
-    const fiel = Fiel.create(certStr, keyStr, creds.contrasena);
-    if (!fiel.isValid()) {
-      throw new Error('El certificado o la llave privada de la FIEL no son válidos o la contraseña es incorrecta.');
+  const isKeyPem = keyBuf.toString('utf8', 0, 100).includes('-----BEGIN');
+  const keyStr = isKeyPem ? keyBuf.toString('utf8') : keyBuf.toString('binary');
+
+  const passwordsToTry = [
+    creds.contrasena,
+    creds.contrasena.trim(),
+    creds.contrasena.replace(/[\r\n]+/g, ''),
+    creds.contrasena.trim().replace(/[\r\n]+/g, '')
+  ].filter((p, i, arr) => p !== undefined && p !== null && arr.indexOf(p) === i);
+
+  let lastErr: any = null;
+
+  for (const pass of passwordsToTry) {
+    try {
+      const fiel = Fiel.create(certStr, keyStr, pass);
+      if (fiel && fiel.isValid()) {
+        if (!creds.rfc) {
+          try {
+            creds.rfc = fiel.getRfc().toUpperCase();
+          } catch {
+            // ignore
+          }
+        }
+        return fiel;
+      }
+    } catch (err: any) {
+      lastErr = err;
     }
-    if (!creds.rfc) {
-      try {
-        creds.rfc = fiel.getRfc().toUpperCase();
-      } catch {
-        // ignore
+  }
+
+  const certVariants = [
+    certStr,
+    certBuf.toString('binary'),
+    certBuf.toString('utf8')
+  ].filter((c, i, arr) => c && arr.indexOf(c) === i);
+
+  const keyVariants = [
+    keyStr,
+    keyBuf.toString('binary'),
+    keyBuf.toString('utf8')
+  ].filter((k, i, arr) => k && arr.indexOf(k) === i);
+
+  for (const c of certVariants) {
+    for (const k of keyVariants) {
+      for (const pass of passwordsToTry) {
+        try {
+          const fiel = Fiel.create(c, k, pass);
+          if (fiel && fiel.isValid()) {
+            if (!creds.rfc) {
+              try {
+                creds.rfc = fiel.getRfc().toUpperCase();
+              } catch {
+                // ignore
+              }
+            }
+            return fiel;
+          }
+        } catch (err: any) {
+          lastErr = err;
+        }
       }
     }
-    return fiel;
-  } catch (err: any) {
-    console.error('[SAT Direct] Error al instanciar FIEL:', err);
-    const rawMsg = String(err?.message || '');
-    if (
-      rawMsg.toLowerCase().includes('cannot open private key') ||
-      rawMsg.toLowerCase().includes('invalid key or password') ||
-      rawMsg.toLowerCase().includes('bad decrypt') ||
-      rawMsg.toLowerCase().includes('wrong final block') ||
-      rawMsg.toLowerCase().includes('passphrase') ||
-      rawMsg.toLowerCase().includes('openssl')
-    ) {
-      throw new Error('La contraseña ingresada de la FIEL (e.firma) es incorrecta o la llave privada (.key) no corresponde al certificado (.cer). Verifique la contraseña e intente nuevamente.');
-    }
-    throw new Error(rawMsg || 'Error al validar las credenciales de la FIEL (.cer, .key y contraseña). Verifique la contraseña e intente nuevamente.');
   }
+
+  console.error('[SAT Direct] Error al instanciar FIEL:', lastErr);
+  const rawMsg = String(lastErr?.message || '');
+  if (
+    rawMsg.toLowerCase().includes('cannot open private key') ||
+    rawMsg.toLowerCase().includes('invalid key or password') ||
+    rawMsg.toLowerCase().includes('bad decrypt') ||
+    rawMsg.toLowerCase().includes('wrong final block') ||
+    rawMsg.toLowerCase().includes('passphrase') ||
+    rawMsg.toLowerCase().includes('openssl') ||
+    rawMsg.toLowerCase().includes('asn.1')
+  ) {
+    throw new Error('La contraseña ingresada de la FIEL (e.firma) es incorrecta o la llave privada (.key) no corresponde al certificado (.cer). Verifique la contraseña e intente nuevamente.');
+  }
+  throw new Error(rawMsg || 'Error al validar las credenciales de la FIEL (.cer, .key y contraseña). Verifique la contraseña e intente nuevamente.');
 }
 
 function getMexicoDateParts() {
@@ -108,17 +172,27 @@ function getMexicoDateParts() {
 
 function getMexicoNow(): { nowYmd: string; nowHms: string; nowFull: string } {
   // Mexico City time with 3-minute safety buffer for SAT clock skew
-  const mxStr = new Date(Date.now() - 180000).toLocaleString('en-US', { timeZone: 'America/Mexico_City' });
-  const mxDate = new Date(mxStr);
-  const y = mxDate.getFullYear();
-  const m = String(mxDate.getMonth() + 1).padStart(2, '0');
-  const d = String(mxDate.getDate()).padStart(2, '0');
-  const h = String(mxDate.getHours()).padStart(2, '0');
-  const min = String(mxDate.getMinutes()).padStart(2, '0');
-  const s = String(mxDate.getSeconds()).padStart(2, '0');
+  const d = new Date(Date.now() - 180000);
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Mexico_City',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  });
+  const parts = formatter.formatToParts(d);
+  const p: Record<string, string> = {};
+  for (const part of parts) {
+    p[part.type] = part.value;
+  }
+  let hour = p.hour || '00';
+  if (hour === '24') hour = '00';
 
-  const nowYmd = `${y}-${m}-${d}`;
-  const nowHms = `${h}:${min}:${s}`;
+  const nowYmd = `${p.year}-${p.month}-${p.day}`;
+  const nowHms = `${hour}:${p.minute}:${p.second}`;
   const nowFull = `${nowYmd} ${nowHms}`;
   return { nowYmd, nowHms, nowFull };
 }
@@ -135,25 +209,19 @@ function formatSatDate(dateInput: string, boundary: 'start' | 'end'): string {
   }
 
   let cleaned = String(dateInput).trim().replace('T', ' ');
-  const datePart = cleaned.substring(0, 10);
+  const spaceIndex = cleaned.indexOf(' ');
+  const datePart = spaceIndex > 0 ? cleaned.substring(0, spaceIndex) : cleaned;
+  let timePart = spaceIndex > 0 ? cleaned.substring(spaceIndex + 1) : '';
 
-  if (cleaned.length === 10) {
-    if (boundary === 'start') {
-      cleaned = `${datePart} 00:00:00`;
-    } else {
-      if (datePart >= mx.nowYmd) {
-        cleaned = mx.nowFull;
-      } else {
-        cleaned = `${datePart} 23:59:59`;
-      }
-    }
-  } else if (boundary === 'end') {
-    if (datePart >= mx.nowYmd) {
+  if (!timePart) {
+    timePart = (boundary === 'start') ? '00:00:00' : '23:59:59';
+  }
+
+  cleaned = `${datePart} ${timePart}`;
+
+  if (boundary === 'end') {
+    if (datePart >= mx.nowYmd && cleaned > mx.nowFull) {
       cleaned = mx.nowFull;
-    } else {
-      if (cleaned > mx.nowFull) {
-        cleaned = mx.nowFull;
-      }
     }
   }
 
@@ -234,6 +302,91 @@ export function parseCfdiXml(xmlContent: string, fileName: string) {
   };
 }
 
+export function parseSatMetadataTxt(txtContent: string, fileName: string): any[] {
+  if (!txtContent) return [];
+  const lines = txtContent.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  if (lines.length === 0) return [];
+
+  const firstLine = lines[0];
+  let delimiter = '~';
+  if (firstLine.includes('~')) delimiter = '~';
+  else if (firstLine.includes('|')) delimiter = '|';
+  else if (firstLine.includes('\t')) delimiter = '\t';
+
+  const headers = firstLine.split(delimiter).map(h => h.trim().toLowerCase());
+
+  const findIdx = (...names: string[]) => {
+    return headers.findIndex(h => names.some(n => h.includes(n.toLowerCase())));
+  };
+
+  const uuidIdx = findIdx('uuid', 'folio fiscal');
+  const emisorRfcIdx = findIdx('rfcemisor', 'rfc emisor');
+  const emisorNombreIdx = findIdx('nombreemisor', 'nombre emisor', 'razonsocialemisor');
+  const receptorRfcIdx = findIdx('rfcreceptor', 'rfc receptor');
+  const receptorNombreIdx = findIdx('nombrereceptor', 'nombre receptor', 'razonsocialreceptor');
+  const fechaIdx = findIdx('fechaemision', 'fecha emision', 'fecha');
+  const montoIdx = findIdx('monto', 'total');
+  const efectoIdx = findIdx('efectocomprobante', 'efecto comprobante', 'tipo');
+  const estatusIdx = findIdx('estatus', 'estado');
+
+  const results: any[] = [];
+
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split(delimiter).map(c => c.trim());
+    if (cols.length < 3) continue;
+
+    const uuid = (uuidIdx >= 0 && cols[uuidIdx]) ? cols[uuidIdx].toUpperCase() : (cols[0]?.length >= 30 ? cols[0].toUpperCase() : '');
+    if (!uuid || uuid.length < 10) continue;
+
+    const rfcEmisor = (emisorRfcIdx >= 0 && cols[emisorRfcIdx]) ? cols[emisorRfcIdx].toUpperCase() : '';
+    const nombreEmisor = (emisorNombreIdx >= 0) ? cols[emisorNombreIdx] : '';
+    const rfcReceptor = (receptorRfcIdx >= 0 && cols[receptorRfcIdx]) ? cols[receptorRfcIdx].toUpperCase() : '';
+    const nombreReceptor = (receptorNombreIdx >= 0) ? cols[receptorNombreIdx] : '';
+    const fechaEmision = (fechaIdx >= 0) ? cols[fechaIdx] : '';
+    const montoRaw = (montoIdx >= 0) ? cols[montoIdx] : '0';
+    const totalNum = parseFloat(montoRaw.replace(/[^0-9.-]+/g, '')) || 0;
+    const efecto = (efectoIdx >= 0) ? cols[efectoIdx] : 'Ingreso';
+    const estatus = (estatusIdx >= 0) ? cols[estatusIdx] : 'Vigente';
+
+    const tipoMap: Record<string, string> = {
+      'I': 'Ingreso',
+      'E': 'Egreso',
+      'T': 'Traslado',
+      'N': 'Nómina',
+      'P': 'Pago',
+      '1': 'Vigente',
+      '0': 'Cancelado'
+    };
+
+    results.push({
+      uuid,
+      version: 'Metadata',
+      serie: '',
+      folio: '',
+      fechaEmision,
+      fecha: fechaEmision,
+      rfCemisor: rfcEmisor,
+      rfcEmisor,
+      razonSocialEmisor: nombreEmisor,
+      nombreEmisor,
+      rfcReceptor,
+      razonSocialReceptor: nombreReceptor,
+      nombreReceptor,
+      total: '$' + totalNum.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+      subtotal: '$' + totalNum.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+      totalNum,
+      subTotalNum: totalNum,
+      tipoDeComprobante: efecto,
+      efectoDelComprobante: tipoMap[efecto] || efecto || 'Ingreso',
+      estatus: tipoMap[estatus] || estatus || 'Vigente',
+      fileName,
+      rawXml: ''
+    });
+  }
+
+  return results;
+}
+
 export async function solicitaDescargaDirect(
   creds: FielCredentials,
   params: {
@@ -251,8 +404,26 @@ export async function solicitaDescargaDirect(
   const webClient = new SafeHttpsWebClient();
   const service = new Service(requestBuilder, webClient);
 
-  const startDateStr = formatSatDate(params.fecha_inicial, 'start');
-  const endDateStr = formatSatDate(params.fecha_final, 'end');
+  let startDateStr = formatSatDate(params.fecha_inicial, 'start');
+  let endDateStr = formatSatDate(params.fecha_final, 'end');
+
+  // CRITICAL: Ensure startDateStr < endDateStr for SAT SOAP API
+  if (startDateStr >= endDateStr) {
+    const sDatePart = startDateStr.substring(0, 10);
+    endDateStr = `${sDatePart} 23:59:59`;
+
+    if (startDateStr >= endDateStr) {
+      const sDateTime = new Date(startDateStr.replace(' ', 'T'));
+      const adjustedEnd = new Date(sDateTime.getTime() + 1000);
+      const y = adjustedEnd.getFullYear();
+      const m = String(adjustedEnd.getMonth() + 1).padStart(2, '0');
+      const d = String(adjustedEnd.getDate()).padStart(2, '0');
+      const h = String(adjustedEnd.getHours()).padStart(2, '0');
+      const min = String(adjustedEnd.getMinutes()).padStart(2, '0');
+      const s = String(adjustedEnd.getSeconds()).padStart(2, '0');
+      endDateStr = `${y}-${m}-${d} ${h}:${min}:${s}`;
+    }
+  }
 
   const period = DateTimePeriod.create(
     DateTime.create(startDateStr),
@@ -299,7 +470,13 @@ export async function solicitaDescargaDirect(
   }
 
   console.log(`[SAT Direct] Enviando SolicitaDescarga (${params.tipo || 'recibidos'})...`);
-  const queryResult = await service.query(queryParams);
+  let queryResult;
+  try {
+    queryResult = await service.query(queryParams);
+  } catch (errQuery: any) {
+    console.warn('[SAT Direct] Error enviando query a SAT:', errQuery);
+    throw errQuery;
+  }
 
   const status = queryResult.getStatus();
   const code = status.getCode();
@@ -307,12 +484,45 @@ export async function solicitaDescargaDirect(
   const requestId = queryResult.getRequestId();
 
   if (code !== 5000 && !requestId) {
-    if (code === 5004) {
-      throw new Error(`[SAT Servicio Web - 5004] No se encontraron comprobantes fiscales en el SAT para las fechas o filtros seleccionados (${params.fecha_inicial} a ${params.fecha_final}).`);
-    }
     if (code === 5005) {
-      throw new Error(`[SAT Servicio Web - 5005] Existe una solicitud en proceso idéntica enviada recientemente al SAT. Espere unos momentos o verifique el historial de solicitudes.`);
+      console.log(`[SAT Direct] Código 5005 (solicitud idéntica en proceso). Reintentando en 2.5s...`);
+      await new Promise(r => setTimeout(r, 2500));
+      try {
+        const retryRes = await service.query(queryParams);
+        const retryCode = retryRes.getStatus().getCode();
+        const retryReqId = retryRes.getRequestId();
+        if (retryReqId || retryCode === 5000) {
+          return {
+            idSolicitud: retryReqId,
+            codEstatus: retryCode,
+            mensaje: retryRes.getStatus().getMessage() || 'Solicitud recibida con éxito en el SAT.',
+            estadoSolicitud: 1,
+            success: true
+          };
+        }
+      } catch (eRetry) {
+        console.warn('[SAT Direct] Reintento tras 5005 falló:', eRetry);
+      }
+
+      return {
+        idSolicitud: '',
+        codEstatus: 5005,
+        mensaje: 'Existe una solicitud en proceso idéntica enviada recientemente al SAT. Se consultará de nuevo en la siguiente iteración.',
+        estadoSolicitud: 2,
+        success: true
+      };
     }
+
+    if (code === 5004) {
+      return {
+        idSolicitud: '',
+        codEstatus: 5004,
+        mensaje: `No se encontraron comprobantes fiscales en el SAT para las fechas o filtros seleccionados (${params.fecha_inicial} a ${params.fecha_final}).`,
+        estadoSolicitud: 3,
+        success: true
+      };
+    }
+
     throw new Error(`[SAT Servicio Web - ${code}] ${message || 'Error al enviar solicitud al SAT.'}`);
   }
 
@@ -395,11 +605,14 @@ export async function descargaPaqueteDirect(
     const entries = zip.getEntries();
 
     for (const entry of entries) {
-      if (!entry.isDirectory && entry.entryName.toLowerCase().endsWith('.xml')) {
-        xmlFiles.push({
-          fileName: entry.entryName,
-          content: entry.getData().toString('utf8')
-        });
+      if (!entry.isDirectory) {
+        const nameLower = entry.entryName.toLowerCase();
+        if (nameLower.endsWith('.xml') || nameLower.endsWith('.txt') || nameLower.endsWith('.csv')) {
+          xmlFiles.push({
+            fileName: entry.entryName,
+            content: entry.getData().toString('utf8')
+          });
+        }
       }
     }
   } catch (e) {
@@ -472,22 +685,62 @@ export async function consultarFacturasFielDirect(
       estadoComprobante: mappedEstado
     });
     requestId = solRes.idSolicitud;
+
+    if (!requestId) {
+      if (solRes?.codEstatus === 5004) {
+        return {
+          idSolicitud: '',
+          estadoSolicitud: 'Terminada',
+          codEstatus: 5004,
+          mensaje: solRes.mensaje || `No se encontraron comprobantes fiscales en el SAT para las fechas o filtros seleccionados (${options.fecha_inicial} a ${options.fecha_final}).`,
+          facturas: [],
+          comprobantes: []
+        };
+      }
+
+      if (solRes?.codEstatus === 5005) {
+        return {
+          idSolicitud: '',
+          estadoSolicitud: 'En Proceso',
+          codEstatus: 5005,
+          mensaje: solRes.mensaje || 'Existe una solicitud en proceso idéntica enviada recientemente al SAT. Se reintentará la verificación en la siguiente iteración.',
+          facturas: [],
+          comprobantes: []
+        };
+      }
+
+      throw new Error(solRes?.mensaje || 'No se obtuvo un ID de solicitud del SAT. Verifique el periodo seleccionado e intente nuevamente.');
+    }
   }
 
-  if (!requestId) {
-    throw new Error('No se obtuvo un ID de solicitud del SAT.');
-  }
-
-  // Fast non-blocking status check: SAT generates packages asynchronously.
-  // Perform 1 or 2 quick checks (max ~1-2 seconds total) to prevent serverless FUNCTION_INVOCATION_TIMEOUT
+  // Perform status checks with fast responses to prevent client HTTP timeouts
   let verifyRes: any = null;
   const maxAttempts = options.requestId ? 2 : 1;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     console.log(`[SAT Direct] Verificando solicitud ${requestId} (intento ${attempt}/${maxAttempts})...`);
     try {
       verifyRes = await verificaSolicitudDirect(creds, requestId);
-    } catch (errVer) {
+    } catch (errVer: any) {
       console.warn(`[SAT Direct] Error en intento ${attempt} de verificaSolicitudDirect:`, errVer);
+      const msg = String(errVer?.message || '').toLowerCase();
+      if (
+        msg.includes('contraseña') ||
+        msg.includes('fiel') ||
+        msg.includes('llave') ||
+        msg.includes('certificado') ||
+        msg.includes('private key') ||
+        msg.includes('passphrase') ||
+        msg.includes('invalid key')
+      ) {
+        throw errVer;
+      }
+      verifyRes = {
+        idSolicitud: requestId,
+        estadoSolicitud: 2,
+        estadoSolicitudTexto: 'En Proceso',
+        codigoEstadoSolicitud: 5000,
+        mensajeCodigoEstadoSolicitud: 'El SAT está procesando la solicitud (los servidores del SAT responden de forma asíncrona).'
+      };
     }
 
     if (verifyRes?.idsPaquetes && verifyRes.idsPaquetes.length > 0) {
@@ -520,10 +773,17 @@ export async function consultarFacturasFielDirect(
       }
     }
 
-    for (const xml of allXmlFiles) {
-      const parsed = parseCfdiXml(xml.content, xml.fileName);
-      if (parsed) {
-        facturasParsed.push(parsed);
+    for (const fileItem of allXmlFiles) {
+      if (fileItem.content.includes('<cfdi:Comprobante') || fileItem.content.includes('<Comprobante')) {
+        const parsed = parseCfdiXml(fileItem.content, fileItem.fileName);
+        if (parsed) {
+          facturasParsed.push(parsed);
+        }
+      } else if (fileItem.fileName.toLowerCase().endsWith('.txt') || fileItem.fileName.toLowerCase().endsWith('.csv') || fileItem.content.includes('~') || fileItem.content.includes('|')) {
+        const metaItems = parseSatMetadataTxt(fileItem.content, fileItem.fileName);
+        if (metaItems && metaItems.length > 0) {
+          facturasParsed.push(...metaItems);
+        }
       }
     }
 

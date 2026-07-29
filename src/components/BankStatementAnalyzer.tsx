@@ -181,7 +181,11 @@ export default function BankStatementAnalyzer() {
           clearInterval(animInterval);
         } catch (innerErr: any) {
           console.error(innerErr);
-          setError(innerErr.message || 'Error al procesar el archivo. Inténtelo más tarde.');
+          let errMsg = innerErr.message || 'Error al procesar el archivo. Inténtelo más tarde.';
+          if (errMsg.includes('Failed to fetch') || errMsg.includes('fetch failed') || errMsg.includes('NetworkError')) {
+            errMsg = 'Error de conexión con el servidor API (Failed to fetch). Verifique su conexión e intente nuevamente.';
+          }
+          setError(errMsg);
           setLoading(false);
           clearInterval(animInterval);
         }
