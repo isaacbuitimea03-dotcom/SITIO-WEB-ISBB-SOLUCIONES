@@ -30,20 +30,39 @@ function formatSatRouteError(error: any, defaultMsg: string): string {
 }
 
 function getCredentials(req: Request): FielCredentials {
-  const rfc = req.headers['rfc'] || req.body.rfc || req.query.rfc || req.headers['x-rfc'];
-  const contrasena = req.body.Contrasena || req.body.contrasena;
+  const rfc = req.headers['rfc'] || req.body?.rfc || req.query?.rfc || req.headers['x-rfc'];
+  const contrasena = req.body?.Contrasena || req.body?.contrasena || req.headers['contrasena'] || req.query?.contrasena;
 
   if (!contrasena) throw new Error('La contraseña de la FIEL es requerida.');
 
   const filesMap = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
-  const keyFile = filesMap?.['llavePrivada']?.[0];
-  const certFile = filesMap?.['Certificado']?.[0];
+  let keyFile = filesMap?.['llavePrivada']?.[0];
+  let certFile = filesMap?.['Certificado']?.[0];
+
+  let keyBuffer = keyFile?.buffer;
+  let certBuffer = certFile?.buffer;
+
+  const keyB64 = req.body?.llavePrivadaBase64 || req.body?.keyBase64 || req.body?.llavePrivada;
+  if (!keyBuffer && keyB64 && typeof keyB64 === 'string') {
+    const cleanB64 = keyB64.replace(/^data:.*;base64,/, '').trim();
+    if (cleanB64) {
+      keyBuffer = Buffer.from(cleanB64, 'base64');
+    }
+  }
+
+  const certB64 = req.body?.certificadoBase64 || req.body?.cerBase64 || req.body?.Certificado;
+  if (!certBuffer && certB64 && typeof certB64 === 'string') {
+    const cleanB64 = certB64.replace(/^data:.*;base64,/, '').trim();
+    if (cleanB64) {
+      certBuffer = Buffer.from(cleanB64, 'base64');
+    }
+  }
 
   return {
     rfc: rfc ? String(rfc).toUpperCase().trim() : '',
     contrasena: String(contrasena),
-    llavePrivada: keyFile ? { buffer: keyFile.buffer, originalname: keyFile.originalname } : undefined,
-    certificado: certFile ? { buffer: certFile.buffer, originalname: certFile.originalname } : undefined
+    llavePrivada: keyBuffer ? { buffer: keyBuffer, originalname: keyFile?.originalname || 'llave.key' } : undefined,
+    certificado: certBuffer ? { buffer: certBuffer, originalname: certFile?.originalname || 'certificado.cer' } : undefined
   };
 }
 
@@ -53,7 +72,7 @@ const fielUpload = upload.fields([
 ]);
 
 // 0. Scraper de Constancia de Situación Fiscal (phpcfdi/csf-sat-scraper inspired)
-router.post(['/csf-scraper', '/consultar-csf-scraper'], async (req: Request, res: Response) => {
+router.post(['/csf-scraper', '/sat/csf-scraper', '/api/sat/csf-scraper', '/api/csf-scraper', '/consultar-csf-scraper'], async (req: Request, res: Response) => {
   try {
     const input = req.body.url || req.body.input || req.body.qrUrl || req.body.idCIF;
     const directRfc = req.body.rfc;
@@ -101,7 +120,7 @@ router.post(['/csf-scraper', '/consultar-csf-scraper'], async (req: Request, res
 });
 
 // 1. Constancia de Situación Fiscal (CSF) vía FIEL / Scraper
-router.post(['/csffiel', '/consultar-csffiel'], fielUpload, async (req: Request, res: Response) => {
+router.post(['/csffiel', '/sat/csffiel', '/api/sat/csffiel', '/api/csffiel', '/consultar-csffiel'], fielUpload, async (req: Request, res: Response) => {
   try {
     // Check if URL/idCIF was provided for scraper mode
     const urlInput = req.body.url || req.body.input || req.body.qrUrl;
@@ -139,7 +158,7 @@ router.post(['/csffiel', '/consultar-csffiel'], fielUpload, async (req: Request,
 });
 
 // 2. Opinión de Cumplimiento (OC)
-router.post(['/ocfiel', '/consultar-ocfiel'], fielUpload, async (req: Request, res: Response) => {
+router.post(['/ocfiel', '/sat/ocfiel', '/api/sat/ocfiel', '/api/ocfiel', '/consultar-ocfiel'], fielUpload, async (req: Request, res: Response) => {
   try {
     const creds = getCredentials(req);
     const info = await consultarInformacionFiscalDirect(creds);
@@ -157,7 +176,7 @@ router.post(['/ocfiel', '/consultar-ocfiel'], fielUpload, async (req: Request, r
 });
 
 // 3. Consultar y Descargar Facturas FIEL Directo
-router.post(['/facfiel', '/consultar-facfiel'], fielUpload, async (req: Request, res: Response) => {
+router.post(['/facfiel', '/sat/facfiel', '/api/sat/facfiel', '/api/facfiel', '/consultar-facfiel'], fielUpload, async (req: Request, res: Response) => {
   try {
     const creds = getCredentials(req);
     const {
@@ -200,7 +219,7 @@ router.post(['/facfiel', '/consultar-facfiel'], fielUpload, async (req: Request,
 });
 
 // 4. Retenciones FIEL
-router.post('/retencionfiel', fielUpload, async (req: Request, res: Response) => {
+router.post(['/retencionfiel', '/sat/retencionfiel', '/api/sat/retencionfiel', '/api/retencionfiel'], fielUpload, async (req: Request, res: Response) => {
   try {
     const creds = getCredentials(req);
     const { tipoBusqueda, estatusFactura, fecha_inicial, fecha_final, tipo, requestId } = req.body;
@@ -228,7 +247,7 @@ router.post('/retencionfiel', fielUpload, async (req: Request, res: Response) =>
 });
 
 // 5. Lista Negra EFOS (69-B)
-router.get('/efos/:rfc', async (req: Request, res: Response) => {
+router.get(['/efos/:rfc', '/sat/efos/:rfc', '/api/sat/efos/:rfc', '/api/efos/:rfc'], async (req: Request, res: Response) => {
   try {
     const { rfc } = req.params;
     if (!rfc) {
@@ -244,7 +263,7 @@ router.get('/efos/:rfc', async (req: Request, res: Response) => {
 });
 
 // 6. Información Fiscal FIEL Directo
-router.post('/informacionfiscalfiel', fielUpload, async (req: Request, res: Response) => {
+router.post(['/informacionfiscalfiel', '/sat/informacionfiscalfiel', '/api/sat/informacionfiscalfiel', '/api/informacionfiscalfiel'], fielUpload, async (req: Request, res: Response) => {
   try {
     const creds = getCredentials(req);
     const result = await consultarInformacionFiscalDirect(creds);
@@ -256,7 +275,7 @@ router.post('/informacionfiscalfiel', fielUpload, async (req: Request, res: Resp
 });
 
 // 7. Solicitar descarga masiva al Web Service SAT (@nodecfdi)
-router.post('/solicita', fielUpload, async (req: Request, res: Response) => {
+router.post(['/solicita', '/sat/solicita', '/api/sat/solicita', '/api/solicita'], fielUpload, async (req: Request, res: Response) => {
   try {
     const creds = getCredentials(req);
     const { tipo, fecha_inicial, fecha_final, tipoBusqueda, rfcEmisor, rfcReceptor, estadoComprobante } = req.body;
@@ -290,7 +309,7 @@ router.post('/solicita', fielUpload, async (req: Request, res: Response) => {
 });
 
 // 8. Verificar estado de la solicitud en el Web Service SAT (@nodecfdi)
-router.post('/verifica', fielUpload, async (req: Request, res: Response) => {
+router.post(['/verifica', '/sat/verifica', '/api/sat/verifica', '/api/verifica'], fielUpload, async (req: Request, res: Response) => {
   try {
     const creds = getCredentials(req);
     const idSolicitud = String(
@@ -310,7 +329,7 @@ router.post('/verifica', fielUpload, async (req: Request, res: Response) => {
 });
 
 // 9. Descargar paquete de comprobantes del Web Service SAT (@nodecfdi)
-router.post('/descarga', fielUpload, async (req: Request, res: Response) => {
+router.post(['/descarga', '/sat/descarga', '/api/sat/descarga', '/api/descarga'], fielUpload, async (req: Request, res: Response) => {
   try {
     const creds = getCredentials(req);
     const idPaquete = String(
@@ -330,18 +349,10 @@ router.post('/descarga', fielUpload, async (req: Request, res: Response) => {
 });
 
 // 10. Info de llave API
-router.post(['/createkey', '/create-key'], async (_req: Request, res: Response) => {
+router.post(['/createkey', '/create-key', '/sat/createkey', '/api/sat/createkey', '/api/createkey'], async (_req: Request, res: Response) => {
   res.json({
     success: true,
     message: 'Su aplicación utiliza conexión directa al Web Service oficial del SAT con @nodecfdi/sat-ws-descarga-masiva. No requiere token de API ni llaves de terceros.'
-  });
-});
-
-// Catch-all handler for any unmatched SAT routes or methods to guarantee JSON output
-router.all('*', (req: Request, res: Response) => {
-  res.setHeader('Content-Type', 'application/json');
-  res.status(404).json({
-    error: `Ruta de API del SAT no encontrada o método no permitido: ${req.method} ${req.path}`
   });
 });
 

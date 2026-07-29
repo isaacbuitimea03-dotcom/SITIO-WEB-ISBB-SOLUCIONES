@@ -37,6 +37,24 @@ export interface ParsedCFDI {
   receptorRegimenFiscal?: string;
   receptorRegimenFiscalDesc?: string;
 
+  // SAT Stamps and official header metadata
+  version?: string;
+  moneda?: string;
+  tipoCambio?: string;
+  lugarExpedicion?: string;
+  metodoPago?: string;
+  metodoPagoDesc?: string;
+  exportacion?: string;
+  noCertificado?: string;
+  selloCFDI?: string;
+  uuid?: string;
+  fechaTimbrado?: string;
+  noCertificadoSAT?: string;
+  selloSAT?: string;
+  rfcProvCertif?: string;
+  receptorDomicilioFiscal?: string;
+  cadenaOriginalSAT?: string;
+
   // Custom detailed fields for tax auditor requirements
   usoCfdi: string;
   usoCfdiDesc: string;
@@ -291,6 +309,7 @@ export const parseXMLData = (xmlText: string, fileName: string): ParsedCFDI => {
   
   const comprobante = getElementSafe(xmlDoc, ['cfdi:Comprobante', 'Comprobante']);
   
+  const version = getAttrSafe(comprobante, ['Version', 'version']) || '4.0';
   const folio = getAttrSafe(comprobante, ['Folio', 'folio']);
   const serie = getAttrSafe(comprobante, ['Serie', 'serie']);
   const fecha = getAttrSafe(comprobante, ['Fecha', 'fecha']);
@@ -299,6 +318,13 @@ export const parseXMLData = (xmlText: string, fileName: string): ParsedCFDI => {
   const descuento = parseFloat(getAttrSafe(comprobante, ['Descuento', 'descuento']) || '0');
   const total = parseFloat(getAttrSafe(comprobante, ['Total', 'total']) || '0');
   const formaPago = getAttrSafe(comprobante, ['FormaPago', 'formaPago']) || '';
+  const moneda = getAttrSafe(comprobante, ['Moneda', 'moneda']) || 'MXN';
+  const tipoCambio = getAttrSafe(comprobante, ['TipoCambio', 'tipoCambio']) || '1';
+  const lugarExpedicion = getAttrSafe(comprobante, ['LugarExpedicion', 'lugarExpedicion']) || '';
+  const metodoPago = getAttrSafe(comprobante, ['MetodoPago', 'metodoPago']) || '';
+  const exportacion = getAttrSafe(comprobante, ['Exportacion', 'exportacion']) || '01';
+  const noCertificado = getAttrSafe(comprobante, ['NoCertificado', 'noCertificado']) || '';
+  const selloCFDI = getAttrSafe(comprobante, ['Sello', 'sello']) || '';
   
   const emisor = getElementSafe(xmlDoc, ['cfdi:Emisor', 'Emisor']);
   const emisorRfc = getAttrSafe(emisor, ['Rfc', 'rfc']);
@@ -310,6 +336,18 @@ export const parseXMLData = (xmlText: string, fileName: string): ParsedCFDI => {
   const receptorNombre = getAttrSafe(receptor, ['Nombre', 'nombre']);
   const usoCfdi = getAttrSafe(receptor, ['UsoCFDI', 'usoCFDI']) || '';
   const receptorRegimenFiscal = getAttrSafe(receptor, ['RegimenFiscalReceptor', 'regimenFiscalReceptor', 'RegimenFiscal']);
+  const receptorDomicilioFiscal = getAttrSafe(receptor, ['DomicilioFiscalReceptor', 'domicilioFiscalReceptor']) || '';
+
+  // TimbreFiscalDigital Complement
+  const tfd = getElementSafe(xmlDoc, ['tfd:TimbreFiscalDigital', 'TimbreFiscalDigital']);
+  const uuid = getAttrSafe(tfd, ['UUID', 'uuid']) || '';
+  const fechaTimbrado = getAttrSafe(tfd, ['FechaTimbrado', 'fechaTimbrado']) || fecha;
+  const noCertificadoSAT = getAttrSafe(tfd, ['NoCertificadoSAT', 'noCertificadoSAT']) || '';
+  const selloSAT = getAttrSafe(tfd, ['SelloSAT', 'selloSAT']) || '';
+  const rfcProvCertif = getAttrSafe(tfd, ['RfcProvCertif', 'rfcProvCertif']) || '';
+
+  const tfdVersion = getAttrSafe(tfd, ['Version', 'version']) || '1.1';
+  const cadenaOriginalSAT = uuid ? `||${tfdVersion}|${uuid}|${fechaTimbrado}|${rfcProvCertif}|${selloCFDI}|${noCertificadoSAT}||` : '';
   
   // Extract Conceptos
   const conceptoElements = getElementsSafe(xmlDoc, ['cfdi:Concepto', 'Concepto']);
@@ -973,6 +1011,24 @@ export const parseXMLData = (xmlText: string, fileName: string): ParsedCFDI => {
     isrRetenido,
     conceptos,
     conceptosDetalle,
+
+    // SAT Stamps and official metadata
+    version,
+    moneda,
+    tipoCambio,
+    lugarExpedicion,
+    metodoPago,
+    metodoPagoDesc: metodoPago === 'PUE' ? 'Pago en una sola exhibición' : metodoPago === 'PPD' ? 'Pago en parcialidades o diferido' : metodoPago,
+    exportacion,
+    noCertificado,
+    selloCFDI,
+    uuid,
+    fechaTimbrado,
+    noCertificadoSAT,
+    selloSAT,
+    rfcProvCertif,
+    receptorDomicilioFiscal,
+    cadenaOriginalSAT,
 
     // Custom detailed parameters mapped perfectly
     usoCfdi,

@@ -1,3 +1,4 @@
+import https from 'node:https';
 import {
   Fiel,
   FielRequestBuilder,
@@ -16,28 +17,58 @@ import {
 } from '@nodecfdi/sat-ws-descarga-masiva';
 import AdmZip from 'adm-zip';
 
+// Global Keep-Alive HTTPS Agent to reuse TLS connections across SAT SOAP calls
+const globalSatHttpsAgent = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 30000,
+  maxSockets: 50,
+  maxFreeSockets: 20,
+  timeout: 45000,
+  scheduling: 'fifo'
+});
+
 export class SafeHttpsWebClient extends HttpsWebClient {
-  constructor(timeoutMs = 12000) {
+  constructor(timeoutMs = 45000) {
     super(undefined, undefined, timeoutMs);
   }
 
   async call(request: CRequest): Promise<CResponse> {
     let lastError: any = null;
-    for (let attempt = 0; attempt <= 1; attempt++) {
+    const maxAttempts = 3;
+    
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
-        return await super.call(request);
+        const response = await super.call(request);
+        const statusCode = response.getStatusCode();
+        if (statusCode >= 500 || statusCode === 429) {
+          if (attempt < maxAttempts - 1) {
+            const jitter = Math.random() * 400;
+            const delay = Math.pow(2, attempt) * 1000 + jitter;
+            console.warn(`[SafeHttpsWebClient] HTTP ${statusCode} del SAT. Reintentando intento ${attempt + 1}/${maxAttempts} en ${Math.round(delay)}ms...`);
+            await new Promise(r => setTimeout(r, delay));
+            continue;
+          }
+        }
+        return response;
       } catch (error: any) {
         lastError = error;
         const msg = String(error?.message || '');
-        const isTimeoutOrNetwork = msg.includes('Timeout') ||
-                                   msg.includes('timeout') ||
-                                   msg.includes('ECONNRESET') ||
-                                   msg.includes('ETIMEDOUT') ||
-                                   msg.includes('ENOTFOUND') ||
-                                   msg.includes('socket hung up');
-        if (isTimeoutOrNetwork && attempt < 1) {
-          console.warn(`[SafeHttpsWebClient] Reintento ${attempt + 1}/2 tras error de tiempo/red (${msg})`);
-          await new Promise(r => setTimeout(r, 600));
+        const isTransient = msg.includes('Timeout') ||
+                            msg.includes('timeout') ||
+                            msg.includes('ECONNRESET') ||
+                            msg.includes('ETIMEDOUT') ||
+                            msg.includes('ENOTFOUND') ||
+                            msg.includes('EPIPE') ||
+                            msg.includes('socket hung up') ||
+                            msg.includes('500') ||
+                            msg.includes('502') ||
+                            msg.includes('503') ||
+                            msg.includes('504');
+        if (isTransient && attempt < maxAttempts - 1) {
+          const jitter = Math.random() * 400;
+          const delay = Math.pow(2, attempt) * 1000 + jitter;
+          console.warn(`[SafeHttpsWebClient] Reintento ${attempt + 1}/${maxAttempts} tras error transitorio (${msg}). Esperando ${Math.round(delay)}ms...`);
+          await new Promise(r => setTimeout(r, delay));
           continue;
         }
         break;
@@ -45,12 +76,24 @@ export class SafeHttpsWebClient extends HttpsWebClient {
     }
 
     if (!lastError || typeof lastError.getResponse !== 'function') {
-      const errMsg = lastError?.message || 'Error de comunicación con el servicio Web del SAT.';
-      const errorResponse = new CResponse(0, errMsg, {});
-      throw new WebClientException(errMsg, request, errorResponse);
+      let rawMsg = lastError?.message || 'Error de comunicación con el servicio Web del SAT.';
+      if (rawMsg.includes('401')) {
+        rawMsg = 'HTTP 401 (No Autorizado): El SAT rechazó la autenticación SOAP del paquete o token. Verifique que el certificado (.cer) y la llave (.key) no hayan sido revocados.';
+      } else if (rawMsg.includes('403')) {
+        rawMsg = 'HTTP 403 (Prohibido): Acceso denegado por los servidores del SAT. Verifique las credenciales de la FIEL.';
+      } else if (rawMsg.includes('503') || rawMsg.includes('502') || rawMsg.includes('500')) {
+        rawMsg = 'HTTP 50x (Error de Servidor SAT): Los servidores del Web Service del SAT están en mantenimiento o con alta congestión. Por favor reintente en unos momentos.';
+      }
+      const errorResponse = new CResponse(0, rawMsg, {});
+      throw new WebClientException(rawMsg, request, errorResponse);
     }
     throw lastError;
   }
+}
+
+const sharedWebClient = new SafeHttpsWebClient();
+export function getSharedWebClient(): SafeHttpsWebClient {
+  return sharedWebClient;
 }
 
 export interface FielCredentials {
@@ -58,6 +101,25 @@ export interface FielCredentials {
   contrasena: string;
   llavePrivada?: { buffer: Buffer; originalname: string };
   certificado?: { buffer: Buffer; originalname: string };
+}
+
+export function certBufferToPem(buf: Buffer): string {
+  const utf8 = buf.toString('utf8');
+  if (utf8.includes('-----BEGIN CERTIFICATE-----')) return utf8;
+  const b64 = buf.toString('base64');
+  return '-----BEGIN CERTIFICATE-----\n' + (b64.match(/.{1,64}/g) || [b64]).join('\n') + '\n-----END CERTIFICATE-----\n';
+}
+
+export function keyBufferToVariants(buf: Buffer): string[] {
+  const utf8 = buf.toString('utf8');
+  if (utf8.includes('-----BEGIN')) return [utf8];
+  const b64 = buf.toString('base64');
+  return [
+    '-----BEGIN ENCRYPTED PRIVATE KEY-----\n' + (b64.match(/.{1,64}/g) || [b64]).join('\n') + '\n-----END ENCRYPTED PRIVATE KEY-----\n',
+    '-----BEGIN PRIVATE KEY-----\n' + (b64.match(/.{1,64}/g) || [b64]).join('\n') + '\n-----END PRIVATE KEY-----\n',
+    buf.toString('binary'),
+    buf.toString('base64')
+  ];
 }
 
 export function createFielInstance(creds: FielCredentials): Fiel {
@@ -71,11 +133,8 @@ export function createFielInstance(creds: FielCredentials): Fiel {
   const certBuf = creds.certificado.buffer;
   const keyBuf = creds.llavePrivada.buffer;
 
-  const isCertPem = certBuf.toString('utf8', 0, 100).includes('-----BEGIN');
-  const certStr = isCertPem ? certBuf.toString('utf8') : certBuf.toString('binary');
-
-  const isKeyPem = keyBuf.toString('utf8', 0, 100).includes('-----BEGIN');
-  const keyStr = isKeyPem ? keyBuf.toString('utf8') : keyBuf.toString('binary');
+  const pemCert = certBufferToPem(certBuf);
+  const keyVariants = keyBufferToVariants(keyBuf);
 
   const passwordsToTry = [
     creds.contrasena,
@@ -86,54 +145,22 @@ export function createFielInstance(creds: FielCredentials): Fiel {
 
   let lastErr: any = null;
 
-  for (const pass of passwordsToTry) {
-    try {
-      const fiel = Fiel.create(certStr, keyStr, pass);
-      if (fiel && fiel.isValid()) {
-        if (!creds.rfc) {
-          try {
-            creds.rfc = fiel.getRfc().toUpperCase();
-          } catch {
-            // ignore
-          }
-        }
-        return fiel;
-      }
-    } catch (err: any) {
-      lastErr = err;
-    }
-  }
-
-  const certVariants = [
-    certStr,
-    certBuf.toString('binary'),
-    certBuf.toString('utf8')
-  ].filter((c, i, arr) => c && arr.indexOf(c) === i);
-
-  const keyVariants = [
-    keyStr,
-    keyBuf.toString('binary'),
-    keyBuf.toString('utf8')
-  ].filter((k, i, arr) => k && arr.indexOf(k) === i);
-
-  for (const c of certVariants) {
-    for (const k of keyVariants) {
-      for (const pass of passwordsToTry) {
-        try {
-          const fiel = Fiel.create(c, k, pass);
-          if (fiel && fiel.isValid()) {
-            if (!creds.rfc) {
-              try {
-                creds.rfc = fiel.getRfc().toUpperCase();
-              } catch {
-                // ignore
-              }
+  for (const k of keyVariants) {
+    for (const pass of passwordsToTry) {
+      try {
+        const fiel = Fiel.create(pemCert, k, pass);
+        if (fiel && fiel.isValid()) {
+          if (!creds.rfc) {
+            try {
+              creds.rfc = fiel.getRfc().toUpperCase();
+            } catch {
+              // ignore
             }
-            return fiel;
           }
-        } catch (err: any) {
-          lastErr = err;
+          return fiel;
         }
+      } catch (err: any) {
+        lastErr = err;
       }
     }
   }
@@ -150,6 +177,9 @@ export function createFielInstance(creds: FielCredentials): Fiel {
     rawMsg.toLowerCase().includes('asn.1')
   ) {
     throw new Error('La contraseña ingresada de la FIEL (e.firma) es incorrecta o la llave privada (.key) no corresponde al certificado (.cer). Verifique la contraseña e intente nuevamente.');
+  }
+  if (rawMsg.includes('Cannot parse X509 certificate')) {
+    throw new Error('El archivo de certificado (.cer) no es un certificado X.509 válido de la e.firma.');
   }
   throw new Error(rawMsg || 'Error al validar las credenciales de la FIEL (.cer, .key y contraseña). Verifique la contraseña e intente nuevamente.');
 }
@@ -401,7 +431,7 @@ export async function solicitaDescargaDirect(
 ) {
   const fiel = createFielInstance(creds);
   const requestBuilder = new FielRequestBuilder(fiel);
-  const webClient = new SafeHttpsWebClient();
+  const webClient = getSharedWebClient();
   const service = new Service(requestBuilder, webClient);
 
   let startDateStr = formatSatDate(params.fecha_inicial, 'start');
@@ -535,99 +565,211 @@ export async function solicitaDescargaDirect(
   };
 }
 
+// Map for active in-flight request deduplication to prevent spamming SAT with duplicate requests
+const inFlightVerifications = new Map<string, Promise<any>>();
+
 export async function verificaSolicitudDirect(
   creds: FielCredentials,
   idSolicitud: string
 ) {
-  const fiel = createFielInstance(creds);
-  const requestBuilder = new FielRequestBuilder(fiel);
-  const webClient = new SafeHttpsWebClient();
-  const service = new Service(requestBuilder, webClient);
+  if (inFlightVerifications.has(idSolicitud)) {
+    console.log(`[SAT Direct] Reutilizando respuesta de verificación en vuelo para solicitud ${idSolicitud}...`);
+    return await inFlightVerifications.get(idSolicitud)!;
+  }
 
-  console.log(`[SAT Direct] Verificando Solicitud ${idSolicitud}...`);
-  const verifyResult = await service.verify(idSolicitud);
+  const task = (async () => {
+    try {
+      const fiel = createFielInstance(creds);
+      const requestBuilder = new FielRequestBuilder(fiel);
+      const webClient = getSharedWebClient();
+      const service = new Service(requestBuilder, webClient);
 
-  const status = verifyResult.getStatus();
-  const statusRequest = verifyResult.getStatusRequest();
-  const codeRequest = verifyResult.getCodeRequest();
-  const packageIds = verifyResult.getPackageIds() || [];
-  const numberCfdis = verifyResult.getNumberCfdis() || 0;
+      console.log(`[SAT Direct] Verificando Solicitud ${idSolicitud}...`);
+      const verifyResult = await service.verify(idSolicitud);
 
-  const estadoCode = statusRequest ? statusRequest.getValue() : 2;
-  const codigoEstadoCode = codeRequest ? codeRequest.getValue() : 5000;
+      const status = verifyResult.getStatus();
+      const statusRequest = verifyResult.getStatusRequest();
+      const codeRequest = verifyResult.getCodeRequest();
+      const packageIds = verifyResult.getPackageIds() || [];
+      const numberCfdis = verifyResult.getNumberCfdis() || 0;
 
-  const estadoTextos: Record<number, string> = {
-    1: 'Aceptada',
-    2: 'En Proceso',
-    3: 'Terminada',
-    4: 'Error',
-    5: 'Rechazada',
-    6: 'Vencida'
-  };
+      const estadoCode = statusRequest ? statusRequest.getValue() : 2;
+      const codigoEstadoCode = codeRequest ? codeRequest.getValue() : 5000;
 
-  return {
-    idSolicitud,
-    codEstatus: status.getCode(),
-    mensaje: status.getMessage(),
-    estadoSolicitud: estadoCode,
-    estadoSolicitudTexto: estadoTextos[estadoCode] || 'En Proceso',
-    codigoEstadoSolicitud: codigoEstadoCode,
-    mensajeCodigoEstadoSolicitud: status.getMessage() || '',
-    idsPaquetes: packageIds,
-    numeroCFDIs: numberCfdis,
-    success: true
-  };
+      const estadoTextos: Record<number, string> = {
+        1: 'Aceptada',
+        2: 'En Proceso',
+        3: 'Terminada',
+        4: 'Error',
+        5: 'Rechazada',
+        6: 'Vencida'
+      };
+
+      return {
+        idSolicitud,
+        codEstatus: status.getCode(),
+        mensaje: status.getMessage(),
+        estadoSolicitud: estadoCode,
+        estadoSolicitudTexto: estadoTextos[estadoCode] || 'En Proceso',
+        codigoEstadoSolicitud: codigoEstadoCode,
+        mensajeCodigoEstadoSolicitud: status.getMessage() || '',
+        idsPaquetes: packageIds,
+        numeroCFDIs: numberCfdis,
+        success: true
+      };
+    } finally {
+      inFlightVerifications.delete(idSolicitud);
+    }
+  })();
+
+  inFlightVerifications.set(idSolicitud, task);
+  return await task;
 }
 
 export async function descargaPaqueteDirect(
   creds: FielCredentials,
-  idPaquete: string
+  idPaquete: string,
+  maxRetries = 4
 ) {
-  const fiel = createFielInstance(creds);
-  const requestBuilder = new FielRequestBuilder(fiel);
-  const webClient = new SafeHttpsWebClient();
-  const service = new Service(requestBuilder, webClient);
+  let lastErr: any = null;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const fiel = createFielInstance(creds);
+      const requestBuilder = new FielRequestBuilder(fiel);
+      const webClient = getSharedWebClient();
+      const service = new Service(requestBuilder, webClient);
 
-  console.log(`[SAT Direct] Descargando Paquete ${idPaquete}...`);
-  const downloadResult = await service.download(idPaquete);
+      console.log(`[SAT Direct] Solicitando descarga de Paquete ${idPaquete} (Intento ${attempt + 1}/${maxRetries})...`);
+      const downloadResult = await service.download(idPaquete);
 
-  const status = downloadResult.getStatus();
-  const packageContentB64 = downloadResult.getPackageContent();
+      const status = downloadResult.getStatus();
+      const packageContentB64 = downloadResult.getPackageContent();
 
-  if (!packageContentB64) {
-    throw new Error(`[SAT Servicio Web - ${status.getCode()}] ${status.getMessage() || 'El SAT no devolvió contenido para el paquete.'}`);
-  }
+      if (!packageContentB64) {
+        const statusCode = status.getCode();
+        const statusMsg = status.getMessage() || '';
+        const isPendingSatStorage = statusCode === 404 || statusMsg.includes('404') || statusMsg.includes('Error no controlado');
+        
+        if (isPendingSatStorage) {
+          throw new Error(`[SAT 404] El paquete ${idPaquete} se está generando en los servidores del SAT.`);
+        }
+        throw new Error(`[SAT Servicio Web - ${statusCode}] ${statusMsg || 'El SAT no devolvió contenido para el paquete.'}`);
+      }
 
-  const xmlFiles: { fileName: string; content: string }[] = [];
-  try {
-    const zipBuffer = Buffer.from(packageContentB64, 'base64');
-    const zip = new AdmZip(zipBuffer);
-    const entries = zip.getEntries();
+      const xmlFiles: { fileName: string; content: string }[] = [];
+      const zipBuffer = Buffer.from(packageContentB64, 'base64');
+      
+      // Validate ZIP file integrity
+      const zip = new AdmZip(zipBuffer);
+      const entries = zip.getEntries();
+      if (!entries) {
+        throw new Error('El paquete ZIP descargado no tiene formato o entradas válidas.');
+      }
 
-    for (const entry of entries) {
-      if (!entry.isDirectory) {
-        const nameLower = entry.entryName.toLowerCase();
-        if (nameLower.endsWith('.xml') || nameLower.endsWith('.txt') || nameLower.endsWith('.csv')) {
-          xmlFiles.push({
-            fileName: entry.entryName,
-            content: entry.getData().toString('utf8')
-          });
+      for (const entry of entries) {
+        if (!entry.isDirectory) {
+          const nameLower = entry.entryName.toLowerCase();
+          if (nameLower.endsWith('.xml') || nameLower.endsWith('.txt') || nameLower.endsWith('.csv')) {
+            xmlFiles.push({
+              fileName: entry.entryName,
+              content: entry.getData().toString('utf8')
+            });
+          }
         }
       }
+
+      return {
+        idPaquete,
+        codEstatus: status.getCode(),
+        mensaje: status.getMessage(),
+        paqueteB64: packageContentB64,
+        zipBase64: packageContentB64,
+        xmlFiles,
+        totalXmlsExtracted: xmlFiles.length,
+        isPending: false,
+        success: true
+      };
+    } catch (e: any) {
+      lastErr = e;
+      const isSatPending404 = e.message?.includes('404') || e.message?.includes('generando') || e.message?.includes('Error no controlado');
+      
+      if (attempt < maxRetries - 1) {
+        const jitter = Math.random() * 500;
+        const delay = isSatPending404 
+          ? (attempt + 1) * 1800 + jitter 
+          : Math.pow(2, attempt) * 1000 + jitter;
+        
+        if (isSatPending404) {
+          console.log(`[SAT Direct] El paquete ${idPaquete} está en preparación en el SAT. Esperando ${Math.round(delay)}ms para reintentar...`);
+        } else {
+          console.warn(`[SAT Direct] Reintentando paquete ${idPaquete} tras error (${e.message}) en ${Math.round(delay)}ms...`);
+        }
+        await new Promise(r => setTimeout(r, delay));
+      }
     }
-  } catch (e) {
-    console.warn('[SAT Direct] Error al extraer archivos del paquete ZIP:', e);
   }
 
+  // If still 404 after retries, return graceful pending status object instead of crashing
+  const is404 = lastErr?.message?.includes('404') || lastErr?.message?.includes('generando') || lastErr?.message?.includes('Error no controlado');
+  if (is404) {
+    console.log(`[SAT Direct] Paquete ${idPaquete} aún no está listo en el almacenamiento del SAT. Se reintentará en la siguiente verificación.`);
+    return {
+      idPaquete,
+      codEstatus: 404,
+      mensaje: 'El paquete continúa en generación en los servidores del SAT.',
+      paqueteB64: '',
+      zipBase64: '',
+      xmlFiles: [],
+      totalXmlsExtracted: 0,
+      isPending: true,
+      success: false
+    };
+  }
+
+  throw lastErr || new Error(`Error al descargar el paquete ${idPaquete}`);
+}
+
+export async function descargaPaquetesEnParaleloDirect(
+  creds: FielCredentials,
+  idsPaquetes: string[],
+  concurrencyLimit = 4
+) {
+  const allXmlFiles: { fileName: string; content: string }[] = [];
+  const errors: { idPaquete: string; error: string }[] = [];
+  let downloadedCount = 0;
+  let pendingPackagesCount = 0;
+
+  let index = 0;
+  async function worker() {
+    while (index < idsPaquetes.length) {
+      const currentIndex = index++;
+      const pkgId = idsPaquetes[currentIndex];
+      try {
+        const pkgRes = await descargaPaqueteDirect(creds, pkgId);
+        if (pkgRes.isPending) {
+          pendingPackagesCount++;
+        } else if (pkgRes.xmlFiles && pkgRes.xmlFiles.length > 0) {
+          allXmlFiles.push(...pkgRes.xmlFiles);
+          downloadedCount++;
+        } else if (pkgRes.success) {
+          downloadedCount++;
+        }
+      } catch (err: any) {
+        console.warn(`[SAT Direct Worker] Falló descarga de paquete ${pkgId}:`, err);
+        errors.push({ idPaquete: pkgId, error: err.message || 'Error de descarga' });
+      }
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(concurrencyLimit, idsPaquetes.length) }, () => worker());
+  await Promise.all(workers);
+
   return {
-    idPaquete,
-    codEstatus: status.getCode(),
-    mensaje: status.getMessage(),
-    paqueteB64: packageContentB64,
-    zipBase64: packageContentB64,
-    xmlFiles,
-    totalXmlsExtracted: xmlFiles.length,
-    success: true
+    xmlFiles: allXmlFiles,
+    totalDownloadedPackages: downloadedCount,
+    pendingPackagesCount,
+    totalPackages: idsPaquetes.length,
+    errors
   };
 }
 
@@ -759,19 +901,10 @@ export async function consultarFacturasFielDirect(
   }
 
   if (verifyRes && verifyRes.idsPaquetes && verifyRes.idsPaquetes.length > 0) {
-    const allXmlFiles: { fileName: string; content: string }[] = [];
     const facturasParsed: any[] = [];
-
-    for (const pkgId of verifyRes.idsPaquetes) {
-      try {
-        const pkgRes = await descargaPaqueteDirect(creds, pkgId);
-        if (pkgRes.xmlFiles) {
-          allXmlFiles.push(...pkgRes.xmlFiles);
-        }
-      } catch (errPkg) {
-        console.warn(`[SAT Direct] Error descargando paquete ${pkgId}:`, errPkg);
-      }
-    }
+    console.log(`[SAT Direct] Descargando ${verifyRes.idsPaquetes.length} paquete(s) en paralelo...`);
+    const downloadBatch = await descargaPaquetesEnParaleloDirect(creds, verifyRes.idsPaquetes, 4);
+    const allXmlFiles = downloadBatch.xmlFiles || [];
 
     for (const fileItem of allXmlFiles) {
       if (fileItem.content.includes('<cfdi:Comprobante') || fileItem.content.includes('<Comprobante')) {
@@ -785,6 +918,22 @@ export async function consultarFacturasFielDirect(
           facturasParsed.push(...metaItems);
         }
       }
+    }
+
+    if (downloadBatch.pendingPackagesCount > 0 && allXmlFiles.length === 0) {
+      console.log(`[SAT Direct] Paquetes reportados por SAT (${verifyRes.idsPaquetes.length}) aún en proceso de generación CDN. Manteniendo estatus 'En Proceso'.`);
+      return {
+        idSolicitud: requestId,
+        estadoSolicitud: 'En Proceso',
+        codEstatus: verifyRes.codEstatus,
+        idsPaquetes: verifyRes.idsPaquetes,
+        numeroCFDIs: verifyRes.numeroCFDIs || 0,
+        facturas: [],
+        comprobantes: [],
+        xmlFiles: [],
+        totalXmlsExtracted: 0,
+        mensaje: `Los paquetes XML (${verifyRes.idsPaquetes.length}) se están generando en los servidores del SAT. Sincronizando automáticamente...`
+      };
     }
 
     return {

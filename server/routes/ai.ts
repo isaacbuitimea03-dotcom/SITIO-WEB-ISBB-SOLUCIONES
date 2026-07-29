@@ -53,7 +53,7 @@ async function generateContentWithRetry(options: any, maxRetries = 3) {
 }
 
 // 1. Asesor Fiscal AI Consultations
-router.post('/analyze-tax-ai', async (req: Request, res: Response) => {
+router.post(['/analyze-tax-ai', '/ai/analyze-tax-ai', '/api/ai/analyze-tax-ai', '/api/analyze-tax-ai'], async (req: Request, res: Response) => {
   try {
     const { prompt, chatHistory } = req.body;
     
@@ -102,7 +102,7 @@ router.post('/analyze-tax-ai', async (req: Request, res: Response) => {
 });
 
 // 2. Audit XML file lists using AI
-router.post('/analyze-xml-ai', async (req: Request, res: Response) => {
+router.post(['/analyze-xml-ai', '/ai/analyze-xml-ai', '/api/ai/analyze-xml-ai', '/api/analyze-xml-ai'], async (req: Request, res: Response) => {
   try {
     const { xmlMetadataList, fileDetails, xmlSummary, query, regimen } = req.body;
 

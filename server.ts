@@ -17,52 +17,45 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // App Health & Status API
-app.get(['/api/health', '/api'], (req: Request, res: Response) => {
+app.get(['/api/health', '/api', '/health'], (req: Request, res: Response) => {
   res.json({ status: 'ok', message: 'ISBB Soluciones API active' });
 });
 
-// Mount Modular API Routers under /api
+// Mount Routers directly
+app.use('/', satRouter);
+app.use('/', aiRouter);
+app.use('/', bankRouter);
+
 app.use('/api/sat', satRouter);
 app.use('/api/sat-go', satRouter);
 app.use('/api/ai', aiRouter);
 app.use('/api/bank', bankRouter);
+app.use('/api', satRouter);
+app.use('/api', aiRouter);
+app.use('/api', bankRouter);
 
-// Direct API endpoint aliases (with and without /api)
-const satDirectEndpoints = [
-  '/csffiel', '/consultar-csffiel', '/csf-scraper', '/consultar-csf-scraper', '/ocfiel', '/consultar-ocfiel',
-  '/facfiel', '/consultar-facfiel', '/retencionfiel', '/informacionfiscalfiel',
-  '/solicita', '/verifica', '/descarga', '/createkey', '/create-key'
-];
-
-satDirectEndpoints.forEach(ep => {
-  app.use(ep, satRouter);
-  app.use(`/api${ep}`, satRouter);
-});
-
-app.use(['/analyze-tax-ai', '/analyze-xml-ai', '/api/analyze-tax-ai', '/api/analyze-xml-ai'], aiRouter);
-app.use(['/analyze-pdf-statement', '/api/analyze-pdf-statement'], bankRouter);
-
-// Catch-all middleware for unmatched API routes or direct API aliases
-// Guarantees JSON 404 response and PREVENTS falling through to Vite/static index.html
-app.use((req: Request, res: Response, next: any) => {
-  const url = req.originalUrl || req.url || '';
-  const pathName = req.path || '';
-
-  const isApi = url.startsWith('/api') ||
-                pathName.startsWith('/api') ||
-                satDirectEndpoints.some(ep => pathName === ep || pathName.startsWith(`${ep}/`) || url === ep || url.startsWith(`${ep}/`)) ||
-                pathName.startsWith('/analyze-tax-ai') ||
-                pathName.startsWith('/analyze-xml-ai') ||
-                pathName.startsWith('/analyze-pdf-statement');
-
-  if (isApi) {
-    res.setHeader('Content-Type', 'application/json');
-    return res.status(404).json({
-      error: `Ruta de API no encontrada o método no permitido: ${req.method} ${pathName}`
-    });
-  }
-
-  next();
+// Catch-all middleware for any unmatched API endpoints
+// Guarantees a JSON response and prevents falling through to Vite/index.html
+app.use([
+  '/api*',
+  '/sat*',
+  '/ai*',
+  '/bank*',
+  '/csf*',
+  '/facfiel*',
+  '/solicita*',
+  '/verifica*',
+  '/descarga*',
+  '/efos*',
+  '/ocfiel*',
+  '/retencionfiel*',
+  '/informacionfiscalfiel*',
+  '/analyze*'
+], (req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'application/json');
+  return res.status(404).json({
+    error: `Ruta de API no encontrada o método no permitido: ${req.method} ${req.originalUrl}`
+  });
 });
 
 // Global error handling middleware for API routes to guarantee JSON response

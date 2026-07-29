@@ -62,6 +62,8 @@ import {
   getElementSafe,
   getElementsSafe
 } from './utils/xmlParser';
+import { CfdiPdfViewerModal } from './components/CfdiPdfViewerModal';
+import { downloadCfdiPdf } from './utils/cfdiPdfGenerator';
 
 // Interface for filter preset
 interface FilterPreset {
@@ -289,6 +291,7 @@ export default function App() {
   const [auditResult, setAuditResult] = useState<string>('');
   const [xmlSearchQuery, setXmlSearchQuery] = useState('');
   const [selectedFile, setSelectedFile] = useState<ParsedCFDI | null>(null);
+  const [pdfModalCfdi, setPdfModalCfdi] = useState<ParsedCFDI | null>(null);
   const [loadingStep, setLoadingStep] = useState(0);
 
   // Decorative custom micro-loading steps during AI fiscal audit
@@ -2548,17 +2551,31 @@ export default function App() {
                               ${item.total.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                             </td>
                             <td className="p-4 text-center">
-                              <div className="flex justify-center gap-1.5">
+                              <div className="flex justify-center items-center gap-1.5">
+                                <button 
+                                  onClick={() => setPdfModalCfdi(item)}
+                                  className="px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[10px] rounded-lg transition-all shadow-2xs flex items-center gap-1"
+                                  title="Ver Factura en PDF (Estilo SAT)"
+                                >
+                                  <FileText className="w-3.5 h-3.5" /> PDF
+                                </button>
+                                <button 
+                                  onClick={() => downloadCfdiPdf(item)}
+                                  className="p-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-lg transition-colors border border-emerald-200"
+                                  title="Descargar PDF de la Factura"
+                                >
+                                  <Download className="w-3.5 h-3.5" />
+                                </button>
                                 <button 
                                   onClick={() => setSelectedFile(item)}
-                                  className="p-1.5 bg-slate-100 hover:bg-gold-100/50 hover:text-gold-700 hover:border-gold-300 rounded text-slate-500 transition-colors border border-slate-200"
-                                  title="Ver conceptos detallados"
+                                  className="p-1.5 bg-slate-100 hover:bg-slate-200 rounded-lg text-slate-700 transition-colors border border-slate-200"
+                                  title="Ver desgloses fiscales"
                                 >
                                   <Info className="w-3.5 h-3.5" />
                                 </button>
                                 <button 
                                   onClick={() => handleRemoveFileByFilename(item.fileName)}
-                                  className="p-1.5 bg-red-50 hover:bg-red-100 text-red-600 hover:border-red-300 rounded transition-colors border border-red-200"
+                                  className="p-1.5 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg transition-colors border border-red-200"
                                   title="Quitar factura"
                                 >
                                   <Trash2 className="w-3.5 h-3.5" />
@@ -2589,12 +2606,29 @@ export default function App() {
                         </h4>
                         <p className="text-[10px] text-slate-450 truncate max-w-[320px]">{selectedFile.fileName}</p>
                       </div>
-                      <button 
-                        onClick={() => setSelectedFile(null)}
-                        className="bg-white/15 hover:bg-white/20 px-3 py-1 text-xs rounded-lg text-slate-300 hover:text-white border border-white/10 transition-colors font-bold"
-                      >
-                        Cerrar
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button 
+                          onClick={() => {
+                            setPdfModalCfdi(selectedFile);
+                          }}
+                          className="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-xl font-bold text-xs inline-flex items-center gap-1 shadow-sm transition-all"
+                        >
+                          <FileText className="w-3.5 h-3.5" /> Ver PDF
+                        </button>
+                        <button 
+                          onClick={() => downloadCfdiPdf(selectedFile)}
+                          className="bg-emerald-600 hover:bg-emerald-500 text-white p-1.5 rounded-xl font-bold text-xs inline-flex items-center gap-1 shadow-sm transition-all"
+                          title="Descargar PDF"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                        </button>
+                        <button 
+                          onClick={() => setSelectedFile(null)}
+                          className="bg-white/15 hover:bg-white/20 px-3 py-1.5 text-xs rounded-xl text-slate-300 hover:text-white border border-white/10 transition-colors font-bold ml-1"
+                        >
+                          ✕
+                        </button>
+                      </div>
                     </div>
 
                     <div className="p-6 space-y-4 text-xs max-h-[500px] overflow-y-auto">
@@ -2877,7 +2911,15 @@ export default function App() {
                 </div>
               )}
 
-              {/* No subscription plans information banner */}
+              {/* PDF Viewer Modal */}
+              {pdfModalCfdi && (
+                <CfdiPdfViewerModal
+                  parsedCfdi={pdfModalCfdi}
+                  xmlContent={pdfModalCfdi.fileContent}
+                  fileName={pdfModalCfdi.fileName}
+                  onClose={() => setPdfModalCfdi(null)}
+                />
+              )}
 
 
               

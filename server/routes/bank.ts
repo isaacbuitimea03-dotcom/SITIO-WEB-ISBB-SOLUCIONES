@@ -53,7 +53,7 @@ async function generateContentWithRetry(options: any, maxRetries = 3) {
 }
 
 // Route for PDF Bank Statement (Estado de Cuenta) analysis powered by Gemini 2.0+ Multimodal PDF features
-router.post('/analyze-pdf-statement', async (req: Request, res: Response) => {
+router.post(['/analyze-pdf-statement', '/bank/analyze-pdf-statement', '/api/bank/analyze-pdf-statement', '/api/analyze-pdf-statement'], async (req: Request, res: Response) => {
   try {
     const { pdfBase64, fileName } = req.body;
 

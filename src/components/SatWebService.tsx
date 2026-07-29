@@ -4,6 +4,8 @@ import * as XLSX from 'xlsx';
 import { parseXMLData, isIvaTasaSpecial, ParsedCFDI } from '../utils/xmlParser';
 import { AncofiClient, getSavedClients, saveClients, fileToBase64, base64ToFile } from '../utils/profileHelpers';
 import { downloadCsfPdf, buildCsfDataFromClient, downloadClientCsfFileOrGeneratedPdf, generateCsfPdfBlob } from '../utils/csfPdfGenerator';
+import { CfdiPdfViewerModal } from './CfdiPdfViewerModal';
+import { downloadCfdiPdf } from '../utils/cfdiPdfGenerator';
 
 import {
   Key,
@@ -37,8 +39,27 @@ import {
   Phone,
   Mail,
   Plus,
-  Edit3
+  Edit3,
+  Timer,
+  Activity,
+  Package,
+  Square
 } from 'lucide-react';
+
+export interface SatSyncMetrics {
+  active: boolean;
+  idSolicitud: string;
+  estado: string;
+  elapsedSeconds: number;
+  nextPollCountdown: number;
+  currentIntervalSeconds: number;
+  pollAttempts: number;
+  packagesFound: number;
+  xmlsDownloaded: number;
+  downloadSpeed: number;
+  lastPollTime: string;
+  message: string;
+}
 
 interface FielState {
   rfc: string;
@@ -72,8 +93,8 @@ interface FacturaItem {
 }
 
 export function SatWebService() {
-  // Active Tab: 'facturas' | 'perfiles'
-  const [activeTab, setActiveTab] = useState<'facturas' | 'perfiles'>('facturas');
+  // Active Tab: 'portal' | 'masiva' | 'perfiles'
+  const [activeTab, setActiveTab] = useState<'portal' | 'masiva' | 'perfiles'>('portal');
 
   // Saved Profiles / Clients State
   const [savedProfiles, setSavedProfiles] = useState<AncofiClient[]>(() => getSavedClients());
@@ -162,12 +183,19 @@ export function SatWebService() {
     return msg;
   };
 
-  // Helper for fetching with 1 automatic retry on transient network errors
-  const fetchWithRetry = async (url: string, options?: RequestInit, maxRetries = 1, delayMs = 1000): Promise<Response> => {
+  // Helper for fetching with automatic retries on transient network errors
+  const fetchWithRetry = async (url: string, options?: RequestInit, maxRetries = 2, delayMs = 1000): Promise<Response> => {
     let lastError: any = null;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         const res = await fetch(url, options);
+        // Retry on transient server errors (502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout)
+        if ((res.status === 502 || res.status === 503 || res.status === 504) && attempt < maxRetries) {
+          const backoffDelay = delayMs * Math.pow(2, attempt);
+          console.warn(`[fetchWithRetry] HTTP ${res.status} on attempt ${attempt + 1}/${maxRetries + 1} for ${url}, retrying in ${backoffDelay}ms...`);
+          await new Promise(r => setTimeout(r, backoffDelay));
+          continue;
+        }
         return res;
       } catch (err: any) {
         lastError = err;
@@ -178,8 +206,9 @@ export function SatWebService() {
                                    msg.includes('NetworkError') ||
                                    msg.includes('Load failed');
         if (isNetworkOrTimeout && attempt < maxRetries) {
-          console.warn(`[fetchWithRetry] Transient network error on attempt ${attempt + 1}/${maxRetries + 1} for ${url}, retrying in ${delayMs}ms...`);
-          await new Promise(r => setTimeout(r, delayMs));
+          const backoffDelay = delayMs * Math.pow(2, attempt);
+          console.warn(`[fetchWithRetry] Transient network error on attempt ${attempt + 1}/${maxRetries + 1} for ${url}, retrying in ${backoffDelay}ms...`);
+          await new Promise(r => setTimeout(r, backoffDelay));
           continue;
         }
         throw err;
@@ -202,8 +231,23 @@ export function SatWebService() {
     if (fiel.satGoToken.trim()) {
       fd.append('satGoToken', fiel.satGoToken.trim());
     }
-    if (keyFile) fd.append('llavePrivada', keyFile);
-    if (certFile) fd.append('Certificado', certFile);
+
+    if (keyFile) {
+      fd.append('llavePrivada', keyFile);
+    } else if (selectedProfileId) {
+      const savedClients = getSavedClients();
+      const p = savedClients.find(c => c.id === selectedProfileId);
+      if (p?.keyBase64) fd.append('keyBase64', p.keyBase64);
+    }
+
+    if (certFile) {
+      fd.append('Certificado', certFile);
+    } else if (selectedProfileId) {
+      const savedClients = getSavedClients();
+      const p = savedClients.find(c => c.id === selectedProfileId);
+      if (p?.cerBase64) fd.append('cerBase64', p.cerBase64);
+    }
+
     return fd;
   };
 
@@ -535,6 +579,8 @@ export function SatWebService() {
     tipo: 'recibidos' as 'recibidos' | 'emitidos',
     tipoBusqueda: '1', // 1 = CFDI, 2 = Metadata
     estatusFactura: '-1', // -1 = Todos, 1 = Vigentes, 0 = Cancelados
+    tipoComprobante: 'ALL' as 'ALL' | 'I' | 'E' | 'P' | 'N' | 'T',
+    rfcFiltro: '',
     descargaComprobantes: true,
     descargaPdfs: false
   });
@@ -543,6 +589,48 @@ export function SatWebService() {
   const [facturasResult, setFacturasResult] = useState<any>(null);
   const [searchFacturaText, setSearchFacturaText] = useState('');
   const [autoPollActive, setAutoPollActive] = useState(false);
+  const [syncMetrics, setSyncMetrics] = useState<SatSyncMetrics>({
+    active: false,
+    idSolicitud: '',
+    estado: 'En Proceso',
+    elapsedSeconds: 0,
+    nextPollCountdown: 2,
+    currentIntervalSeconds: 2,
+    pollAttempts: 0,
+    packagesFound: 0,
+    xmlsDownloaded: 0,
+    downloadSpeed: 0,
+    lastPollTime: '',
+    message: ''
+  });
+  const isPollingInFlightRef = useRef(false);
+
+  const startSyncMetrics = (idSolicitud: string, initialStatus = 'En Proceso') => {
+    setSyncMetrics({
+      active: true,
+      idSolicitud,
+      estado: initialStatus,
+      elapsedSeconds: 0,
+      nextPollCountdown: 2,
+      currentIntervalSeconds: 2,
+      pollAttempts: 1,
+      packagesFound: 0,
+      xmlsDownloaded: 0,
+      downloadSpeed: 0,
+      lastPollTime: new Date().toLocaleTimeString('es-MX'),
+      message: 'Iniciando sincronización adaptativa en tiempo real con los servidores del SAT...'
+    });
+    setAutoPollActive(true);
+  };
+
+  const stopSyncPolling = () => {
+    setSyncMetrics(prev => ({
+      ...prev,
+      active: false,
+      message: 'Sincronización pausada por el usuario.'
+    }));
+    setAutoPollActive(false);
+  };
   const [selectedXmlModal, setSelectedXmlModal] = useState<{ fileName: string; content: string } | null>(null);
   const [batchSyncInfo, setBatchSyncInfo] = useState<{
     active: boolean;
@@ -1174,8 +1262,8 @@ export function SatWebService() {
         setSuccessMessage(`¡Consulta completada con éxito! Se obtuvieron ${data.facturas.length} comprobante(s) fiscal(es).`);
         setAutoPollActive(false);
       } else if (data.idSolicitud && (data.estadoSolicitud === 'En Proceso' || data.estadoSolicitud === 'Aceptada' || data.codEstatus === 5004 || data.codEstatus === 5000)) {
-        setAutoPollActive(true);
-        setSuccessMessage(`⚡ Solicitud procesándose en los servidores del SAT (ID: ${data.idSolicitud}). Sincronizando de forma automática...`);
+        startSyncMetrics(data.idSolicitud, data.estadoSolicitud || 'En Proceso');
+        setSuccessMessage(`⚡ Solicitud procesándose en los servidores del SAT (ID: ${data.idSolicitud}). Sincronizando en tiempo real...`);
       } else {
         setAutoPollActive(false);
         setSuccessMessage('¡Consulta finalizada exitosamente!');
@@ -1188,25 +1276,131 @@ export function SatWebService() {
     }
   };
 
-  // Auto-polling timer when SAT is processing request
+  // 1-Second Clock Ticker Effect for Live Dashboard
   useEffect(() => {
-    let timer: any = null;
-    const isPending = facturasResult?.idSolicitud && 
-      (!facturasResult?.facturas || facturasResult?.facturas.length === 0) &&
-      facturasResult?.estadoSolicitud !== 'Terminada' &&
-      facturasResult?.estadoSolicitud !== 'Rechazada' &&
-      facturasResult?.estadoSolicitud !== 'Error' &&
-      facturasResult?.estadoSolicitud !== 'Vencida';
+    if (!syncMetrics.active) return;
 
-    if (autoPollActive && isPending) {
-      timer = setInterval(() => {
-        handleRevisarEstatusFacturas(facturasResult.idSolicitud);
-      }, 6000);
-    }
-    return () => {
-      if (timer) clearInterval(timer);
+    const ticker = setInterval(() => {
+      setSyncMetrics(prev => {
+        if (!prev.active) return prev;
+        const nextElapsed = prev.elapsedSeconds + 1;
+        const nextCountdown = prev.nextPollCountdown - 1;
+
+        return {
+          ...prev,
+          elapsedSeconds: nextElapsed,
+          nextPollCountdown: Math.max(0, nextCountdown)
+        };
+      });
+    }, 1000);
+
+    return () => clearInterval(ticker);
+  }, [syncMetrics.active]);
+
+  // Adaptive Polling Execution Effect
+  useEffect(() => {
+    if (!syncMetrics.active || syncMetrics.nextPollCountdown > 0) return;
+    if (isPollingInFlightRef.current) return;
+
+    const executeAdaptivePoll = async () => {
+      isPollingInFlightRef.current = true;
+      const currentId = syncMetrics.idSolicitud;
+
+      try {
+        const fd = getFormDataWithFiles();
+        fd.append('requestId', currentId);
+        fd.append('fecha_inicial', `${facturaFilters.fecha_inicial}T00:00:00`);
+        fd.append('fecha_final', `${facturaFilters.fecha_final}T23:59:59`);
+        fd.append('tipo', facturaFilters.tipo);
+        fd.append('tipoBusqueda', facturaFilters.tipoBusqueda);
+        fd.append('estatusFactura', facturaFilters.estatusFactura);
+
+        const pollStartTime = Date.now();
+        const res = await fetchWithRetry('/api/sat/facfiel', { method: 'POST', body: fd });
+        const data = await parseResponseJson(res);
+        const pollDurationSec = Math.max(1, (Date.now() - pollStartTime) / 1000);
+
+        const xmlCount = data?.facturas?.length || 0;
+        const pkgCount = data?.idsPaquetes?.length || (xmlCount > 0 ? 1 : 0);
+        const speed = xmlCount > 0 ? Math.round(xmlCount / pollDurationSec) : 0;
+        const estadoText = data?.estadoSolicitud || 'En Proceso';
+
+        if (data) {
+          setFacturasResult(data);
+        }
+
+        if (xmlCount > 0 || estadoText === 'Terminada') {
+          registerSolicitudInHistory(currentId, 'Terminada', xmlCount);
+          setSyncMetrics(prev => ({
+            ...prev,
+            active: false,
+            estado: 'Completada',
+            pollAttempts: prev.pollAttempts + 1,
+            packagesFound: pkgCount,
+            xmlsDownloaded: xmlCount,
+            downloadSpeed: speed,
+            lastPollTime: new Date().toLocaleTimeString('es-MX'),
+            message: `¡Sincronización completada! ${xmlCount} comprobante(s) procesado(s).`
+          }));
+          setSuccessMessage(`¡Completado! Se descargaron ${xmlCount} comprobante(s) fiscal(es) del SAT.`);
+          setAutoPollActive(false);
+        } else if (estadoText === 'Rechazada' || estadoText === 'Error' || estadoText === 'Vencida') {
+          setSyncMetrics(prev => ({
+            ...prev,
+            active: false,
+            estado: estadoText,
+            message: data?.mensaje || `Solicitud ${estadoText} por el SAT.`
+          }));
+          setErrorMessage(data?.mensaje || `Solicitud ${estadoText} por el SAT.`);
+          setAutoPollActive(false);
+        } else {
+          // Compute adaptive interval:
+          // Minute 1: 2s base interval.
+          // Minute 1-3: 4s to 8s interval.
+          // > 3m: 10s to 12s interval.
+          const elapsed = syncMetrics.elapsedSeconds;
+          let baseInterval = 2;
+          if (elapsed > 180) {
+            baseInterval = 10;
+          } else if (elapsed > 60) {
+            baseInterval = 4 + Math.floor((elapsed - 60) / 30) * 2;
+          }
+
+          if (pkgCount > 0 || estadoText === 'Aceptada') {
+            baseInterval = 2;
+          }
+
+          const jitter = Math.random() * 0.8;
+          const nextInterval = Math.round((baseInterval + jitter) * 10) / 10;
+
+          setSyncMetrics(prev => ({
+            ...prev,
+            estado: estadoText,
+            pollAttempts: prev.pollAttempts + 1,
+            packagesFound: pkgCount,
+            nextPollCountdown: Math.round(nextInterval),
+            currentIntervalSeconds: Math.round(nextInterval),
+            lastPollTime: new Date().toLocaleTimeString('es-MX'),
+            message: `Estatus SAT: ${estadoText}. Próxima verificación adaptativa en ${Math.round(nextInterval)}s...`
+          }));
+        }
+      } catch (err: any) {
+        console.warn('[Adaptive Poll Warning]:', err);
+        const elapsed = syncMetrics.elapsedSeconds;
+        const retryInterval = elapsed > 60 ? 6 : 3;
+        setSyncMetrics(prev => ({
+          ...prev,
+          nextPollCountdown: retryInterval,
+          currentIntervalSeconds: retryInterval,
+          message: 'Reintentando verificación adaptativa...'
+        }));
+      } finally {
+        isPollingInFlightRef.current = false;
+      }
     };
-  }, [autoPollActive, facturasResult]);
+
+    executeAdaptivePoll();
+  }, [syncMetrics.nextPollCountdown, syncMetrics.active]);
 
   // ==========================================
   // TAB 4: SAT WEB SERVICE MASIVO (SOLICITA/VERIFICA/DESCARGA)
@@ -1677,18 +1871,155 @@ export function SatWebService() {
         </div>
       </div>
 
+      {/* LIVE ADAPTIVE SAT SYNCHRONIZATION DASHBOARD PANEL */}
+      {(syncMetrics.active || syncMetrics.elapsedSeconds > 0) && (
+        <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 border border-indigo-800/80 rounded-2xl p-5 shadow-xl text-white space-y-4 animate-fadeIn">
+          {/* Header & Status Badge */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-indigo-800/50 pb-3">
+            <div className="flex items-center gap-3">
+              <div className={`p-2.5 rounded-xl border ${syncMetrics.active ? 'bg-amber-500/20 border-amber-500/40 text-amber-400 animate-pulse' : 'bg-emerald-500/20 border-emerald-500/40 text-emerald-400'}`}>
+                <RefreshCw className={`w-5 h-5 ${syncMetrics.active ? 'animate-spin' : ''}`} />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-sm font-bold text-white uppercase tracking-wider">
+                    Sincronización Inteligente SAT
+                  </h3>
+                  <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-black uppercase tracking-wider ${
+                    syncMetrics.estado === 'Completada' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' :
+                    syncMetrics.estado === 'Rechazada' || syncMetrics.estado === 'Error' ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40' :
+                    'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                  }`}>
+                    {syncMetrics.estado}
+                  </span>
+                </div>
+                <p className="text-xs text-indigo-200 mt-0.5">
+                  ID Solicitud SAT: <span className="font-mono font-bold text-amber-300">{syncMetrics.idSolicitud || '---'}</span>
+                </p>
+              </div>
+            </div>
+
+            {syncMetrics.active && (
+              <button
+                type="button"
+                onClick={stopSyncPolling}
+                className="px-3.5 py-1.5 rounded-xl bg-rose-600/30 hover:bg-rose-600/50 border border-rose-500/40 text-rose-200 font-bold text-xs transition-all inline-flex items-center gap-1.5 self-start sm:self-center"
+              >
+                <Square className="w-3.5 h-3.5" /> Detener Sincronización
+              </button>
+            )}
+          </div>
+
+          {/* Metrics Grid */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3">
+            {/* 1. Tiempo Transcurrido */}
+            <div className="bg-slate-800/80 border border-slate-700/60 rounded-xl p-3">
+              <div className="flex items-center gap-1.5 text-slate-400 text-[11px] font-bold uppercase tracking-wider mb-1">
+                <Clock className="w-3.5 h-3.5 text-indigo-400" /> Tiempo Transcurrido
+              </div>
+              <p className="text-lg font-mono font-black text-amber-400">
+                {Math.floor(syncMetrics.elapsedSeconds / 60).toString().padStart(2, '0')}:
+                {(syncMetrics.elapsedSeconds % 60).toString().padStart(2, '0')}
+              </p>
+            </div>
+
+            {/* 2. Próxima Consulta */}
+            <div className="bg-slate-800/80 border border-slate-700/60 rounded-xl p-3">
+              <div className="flex items-center gap-1.5 text-slate-400 text-[11px] font-bold uppercase tracking-wider mb-1">
+                <Timer className="w-3.5 h-3.5 text-amber-400" /> Próxima Consulta
+              </div>
+              <p className="text-lg font-mono font-black text-emerald-400">
+                {syncMetrics.active ? (
+                  syncMetrics.nextPollCountdown > 0 ? `${syncMetrics.nextPollCountdown}s` : 'Consultando...'
+                ) : '---'}
+              </p>
+            </div>
+
+            {/* 3. Consultas Realizadas */}
+            <div className="bg-slate-800/80 border border-slate-700/60 rounded-xl p-3">
+              <div className="flex items-center gap-1.5 text-slate-400 text-[11px] font-bold uppercase tracking-wider mb-1">
+                <Activity className="w-3.5 h-3.5 text-cyan-400" /> Consultas
+              </div>
+              <p className="text-lg font-mono font-black text-white">
+                {syncMetrics.pollAttempts}
+              </p>
+            </div>
+
+            {/* 4. Paquetes Encontrados */}
+            <div className="bg-slate-800/80 border border-slate-700/60 rounded-xl p-3">
+              <div className="flex items-center gap-1.5 text-slate-400 text-[11px] font-bold uppercase tracking-wider mb-1">
+                <Package className="w-3.5 h-3.5 text-purple-400" /> Paquetes SAT
+              </div>
+              <p className="text-lg font-mono font-black text-purple-300">
+                {syncMetrics.packagesFound}
+              </p>
+            </div>
+
+            {/* 5. XMLs Procesados */}
+            <div className="bg-slate-800/80 border border-slate-700/60 rounded-xl p-3">
+              <div className="flex items-center gap-1.5 text-slate-400 text-[11px] font-bold uppercase tracking-wider mb-1">
+                <FileText className="w-3.5 h-3.5 text-emerald-400" /> XMLs Extraídos
+              </div>
+              <p className="text-lg font-mono font-black text-emerald-300">
+                {syncMetrics.xmlsDownloaded}
+              </p>
+            </div>
+
+            {/* 6. Velocidad */}
+            <div className="bg-slate-800/80 border border-slate-700/60 rounded-xl p-3">
+              <div className="flex items-center gap-1.5 text-slate-400 text-[11px] font-bold uppercase tracking-wider mb-1">
+                <Zap className="w-3.5 h-3.5 text-amber-400" /> Rendimiento
+              </div>
+              <p className="text-lg font-mono font-black text-cyan-300">
+                {syncMetrics.downloadSpeed > 0 ? `${syncMetrics.downloadSpeed} XML/s` : '---'}
+              </p>
+            </div>
+          </div>
+
+          {/* Countdown Progress Bar */}
+          {syncMetrics.active && (
+            <div className="space-y-1">
+              <div className="flex justify-between text-[11px] text-indigo-300 font-medium">
+                <span>{syncMetrics.message || 'Sincronizando con el servicio del SAT...'}</span>
+                <span>{syncMetrics.lastPollTime ? `Última consulta: ${syncMetrics.lastPollTime}` : ''}</span>
+              </div>
+              <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
+                <div
+                  className="bg-gradient-to-r from-indigo-500 via-amber-400 to-emerald-400 h-full transition-all duration-1000 ease-linear rounded-full"
+                  style={{
+                    width: `${Math.max(0, Math.min(100, (1 - syncMetrics.nextPollCountdown / Math.max(1, syncMetrics.currentIntervalSeconds)) * 100))}%`
+                  }}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* NAVIGATION TABS */}
       <div className="flex items-center gap-2 border-b border-slate-200 overflow-x-auto pb-1">
         <button
-          onClick={() => setActiveTab('facturas')}
+          onClick={() => setActiveTab('portal')}
           className={`flex items-center gap-2 px-4 py-3 rounded-xl font-bold text-sm whitespace-nowrap transition-all ${
-            activeTab === 'facturas'
+            activeTab === 'portal'
               ? 'bg-indigo-600 text-white shadow-md shadow-indigo-100'
               : 'text-slate-600 hover:bg-slate-100'
           }`}
         >
-          <FileText className="w-4 h-4" />
-          Consulta Facturas CFDI
+          <Search className="w-4 h-4 text-amber-300" />
+          Módulo Portal SAT "Buscar CFDI"
+        </button>
+
+        <button
+          onClick={() => setActiveTab('masiva')}
+          className={`flex items-center gap-2 px-4 py-3 rounded-xl font-bold text-sm whitespace-nowrap transition-all ${
+            activeTab === 'masiva'
+              ? 'bg-indigo-600 text-white shadow-md shadow-indigo-100'
+              : 'text-slate-600 hover:bg-slate-100'
+          }`}
+        >
+          <Package className="w-4 h-4 text-cyan-300" />
+          Módulo Descarga Masiva (ZIP)
         </button>
 
         <button
@@ -1699,39 +2030,48 @@ export function SatWebService() {
               : 'text-slate-600 hover:bg-slate-100'
           }`}
         >
-          <Key className="w-4 h-4 text-amber-600" />
-          Guardar Credenciales (FIEL / CIEC)
+          <Key className="w-4 h-4 text-amber-800" />
+          Mis Clientes / Credenciales SAT
         </button>
       </div>
 
       {/* TAB CONTENT AREAS */}
 
-      {/* TAB 1: CONSULTA DE FACTURAS */}
-      {activeTab === 'facturas' && (
+      {/* MODULO 1: PORTAL SAT - BUSCAR CFDI (CONSULTA RAPIDA & TABLA) */}
+      {activeTab === 'portal' && (
         <div className="space-y-6">
           <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm space-y-6">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+            <div className="flex flex-col md:flex-row md:items-center justify-between border-b border-slate-100 pb-4 gap-4">
               <div>
-                <h3 className="text-lg font-bold text-slate-900">Consultar y Descargar Facturas CFDI</h3>
-                <p className="text-xs text-slate-500">Obtenga los comprobantes o metadatos emitidos y recibidos directamente del Web Service SAT-GO.</p>
+                <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                  <Search className="w-5 h-5 text-indigo-600" />
+                  Portal SAT - Consulta "Buscar CFDI" (Búsqueda Rápida)
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Módulo independiente que emula la consulta directa en la sección "Buscar CFDI" del portal oficial del SAT. Obtenga la tabla de comprobantes con sus folios, montos, RFCs y descargue XMLs individuales al instante.
+                </p>
               </div>
+              <span className="px-3 py-1.5 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-xl text-xs font-bold shrink-0">
+                ⚡ Consulta Directa & Tabla Inmediata
+              </span>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {/* Filter controls */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
               <div className="space-y-1.5">
-                <label className="text-xs font-bold text-slate-700">Tipo de Comprobantes</label>
+                <label className="text-xs font-bold text-slate-700">Tipo de Consulta</label>
                 <select
                   value={facturaFilters.tipo}
                   onChange={(e) => setFacturaFilters({ ...facturaFilters, tipo: e.target.value as any })}
                   className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm font-semibold bg-slate-50"
                 >
-                  <option value="recibidos">📥 Facturas Recibidas</option>
-                  <option value="emitidos">📤 Facturas Emitidas</option>
+                  <option value="recibidos">📥 Facturas Recibidas (Gastos/Compras)</option>
+                  <option value="emitidos">📤 Facturas Emitidas (Ventas/Ingresos)</option>
                 </select>
               </div>
 
               <div className="space-y-1.5">
-                <label className="text-xs font-bold text-slate-700">Fecha Inicial</label>
+                <label className="text-xs font-bold text-slate-700">Fecha Inicial (Emisión)</label>
                 <input
                   type="date"
                   value={facturaFilters.fecha_inicial}
@@ -1741,7 +2081,7 @@ export function SatWebService() {
               </div>
 
               <div className="space-y-1.5">
-                <label className="text-xs font-bold text-slate-700">Fecha Final</label>
+                <label className="text-xs font-bold text-slate-700">Fecha Final (Emisión)</label>
                 <input
                   type="date"
                   value={facturaFilters.fecha_final}
@@ -1751,16 +2091,43 @@ export function SatWebService() {
               </div>
 
               <div className="space-y-1.5">
-                <label className="text-xs font-bold text-slate-700">Estatus del CFDI</label>
+                <label className="text-xs font-bold text-slate-700">Tipo de Comprobante</label>
+                <select
+                  value={facturaFilters.tipoComprobante}
+                  onChange={(e) => setFacturaFilters({ ...facturaFilters, tipoComprobante: e.target.value as any })}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm font-semibold bg-slate-50"
+                >
+                  <option value="ALL">Todos los Tipos (I, E, P, N, T)</option>
+                  <option value="I">🟢 I - Ingreso (Factura de Venta)</option>
+                  <option value="E">🟠 E - Egreso (Nota de Crédito / Devolución)</option>
+                  <option value="P">🟣 P - Pago (Complemento de Recepción de Pagos)</option>
+                  <option value="N">🔵 N - Nómina (Recibo de Sueldo/Salario)</option>
+                  <option value="T">⚪ T - Traslado (Carta Cobre / Mercancías)</option>
+                </select>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-slate-700">Estatus del CFDI en el SAT</label>
                 <select
                   value={facturaFilters.estatusFactura}
                   onChange={(e) => setFacturaFilters({ ...facturaFilters, estatusFactura: e.target.value })}
                   className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm font-semibold bg-slate-50"
                 >
-                  <option value="-1">Todos los Estatus</option>
+                  <option value="-1">Todos los Estatus (Vigentes y Cancelados)</option>
                   <option value="1">Vigentes únicamente</option>
                   <option value="0">Cancelados únicamente</option>
                 </select>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-slate-700">Filtro por RFC Específico (Opcional)</label>
+                <input
+                  type="text"
+                  placeholder="Ej. AAA010101AAA"
+                  value={facturaFilters.rfcFiltro}
+                  onChange={(e) => setFacturaFilters({ ...facturaFilters, rfcFiltro: e.target.value.toUpperCase() })}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm font-mono uppercase bg-slate-50"
+                />
               </div>
             </div>
 
@@ -1776,7 +2143,7 @@ export function SatWebService() {
                     : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'
                 }`}
               >
-                📅 Año 2024 (01/01/2024 - 31/12/2024)
+                📅 Año 2024
               </button>
               <button
                 type="button"
@@ -1787,7 +2154,7 @@ export function SatWebService() {
                     : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'
                 }`}
               >
-                📅 Año 2025 (01/01/2025 - 31/12/2025)
+                📅 Año 2025
               </button>
               <button
                 type="button"
@@ -1803,28 +2170,7 @@ export function SatWebService() {
               </button>
             </div>
 
-            {batchSyncInfo?.active && (
-              <div className="p-4 rounded-xl bg-indigo-50 border border-indigo-200 space-y-2">
-                <div className="flex items-center justify-between text-xs font-bold text-indigo-950">
-                  <div className="flex items-center gap-2">
-                    <RefreshCw className="w-4 h-4 text-indigo-600 animate-spin" />
-                    <span>Sincronizando Anual por Meses ({batchSyncInfo.completedMonths + 1} de {batchSyncInfo.totalMonths}: {batchSyncInfo.currentLabel})</span>
-                  </div>
-                  <span>{Math.round(((batchSyncInfo.completedMonths) / batchSyncInfo.totalMonths) * 100)}%</span>
-                </div>
-                <div className="w-full bg-indigo-200/60 rounded-full h-2 overflow-hidden">
-                  <div
-                    className="bg-indigo-600 h-2 rounded-full transition-all duration-300"
-                    style={{ width: `${Math.max(5, Math.round(((batchSyncInfo.completedMonths) / batchSyncInfo.totalMonths) * 100))}%` }}
-                  />
-                </div>
-                <p className="text-[11px] text-indigo-700">
-                  Se han recuperado {batchSyncInfo.accumulatedCount} comprobante(s) hasta el momento. Cada mes se procesa individualmente de forma optimizada para evitar saturación y tiempos de espera en el SAT.
-                </p>
-              </div>
-            )}
-
-            <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-2">
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-2 border-t border-slate-100">
               <div className="flex items-center gap-6">
                 <label className="inline-flex items-center gap-2 cursor-pointer text-xs font-bold text-slate-700">
                   <input
@@ -1833,7 +2179,7 @@ export function SatWebService() {
                     onChange={(e) => setFacturaFilters({ ...facturaFilters, descargaComprobantes: e.target.checked })}
                     className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500"
                   />
-                  Descargar XML Comprobantes
+                  Obtener archivos XML individuales de comprobantes
                 </label>
               </div>
 
@@ -1845,33 +2191,33 @@ export function SatWebService() {
                 {isConsultingFacturas ? (
                   <>
                     <RefreshCw className="w-4 h-4 animate-spin" />
-                    Consultando SAT...
+                    Buscando CFDI en SAT...
                   </>
                 ) : (
                   <>
                     <Search className="w-4 h-4" />
-                    Consultar Facturas
+                    Buscar CFDI (Portal SAT)
                   </>
                 )}
               </button>
             </div>
           </div>
 
-          {/* Results Table / Status Card */}
+          {/* Immediate Results Table */}
           {facturasResult && (
             <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm space-y-6">
               {/* CASE 1: Facturas recovered (length > 0) */}
               {facturasResult.facturas && facturasResult.facturas.length > 0 ? (
                 <div className="space-y-6">
-                  {/* Header Stats */}
+                  {/* Header Stats & Export */}
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 rounded-xl bg-indigo-50/60 border border-indigo-100">
                     <div>
                       <div className="flex items-center gap-2 text-indigo-950 font-bold text-base">
                         <CheckCircle2 className="w-5 h-5 text-emerald-600" />
-                        <span>{facturasResult.facturas.length} Comprobante(s) Recuperado(s)</span>
+                        <span>Tabla de Resultados: {facturasResult.facturas.length} Comprobante(s) Encontrado(s)</span>
                       </div>
                       <p className="text-xs text-indigo-700/80 mt-0.5">
-                        Folio de Solicitud SAT: <code className="font-mono bg-white/80 px-1.5 py-0.5 rounded text-[11px]">{facturasResult.idSolicitud}</code>
+                        Folio Consulta SAT: <code className="font-mono bg-white/80 px-1.5 py-0.5 rounded text-[11px]">{facturasResult.idSolicitud || 'PORTAL-SAT-DIRECT'}</code>
                       </p>
                     </div>
 
@@ -1893,28 +2239,31 @@ export function SatWebService() {
                     </div>
                   </div>
 
-                  {/* Filter input */}
-                  <div className="flex items-center justify-between gap-4">
-                    <p className="text-xs font-bold text-slate-700 uppercase tracking-wider">Detalle de Comprobantes CFDI</p>
+                  {/* Search box for table */}
+                  <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+                    <p className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+                      Comprobantes Fiscales Digitales (CFDI 4.0 / 3.3)
+                    </p>
                     <input
                       type="text"
-                      placeholder="Buscar por RFC, Nombre, Folio..."
+                      placeholder="Filtrar por UUID, RFC, Razón Social..."
                       value={searchFacturaText}
                       onChange={(e) => setSearchFacturaText(e.target.value)}
                       className="px-3.5 py-1.5 rounded-xl border border-slate-200 text-xs w-full max-w-xs focus:ring-2 focus:ring-indigo-500"
                     />
                   </div>
 
-                  {/* Facturas Table */}
+                  {/* Facturas Interactive Table */}
                   <div className="overflow-x-auto border border-slate-200 rounded-xl shadow-xs">
                     <table className="w-full text-left border-collapse text-xs">
                       <thead>
                         <tr className="bg-slate-50 border-b border-slate-200 text-slate-700 font-bold uppercase text-[10px] tracking-wider">
-                          <th className="p-3">UUID / Folio</th>
-                          <th className="p-3">Fecha</th>
-                          <th className="p-3">Emisor</th>
-                          <th className="p-3">Receptor</th>
-                          <th className="p-3">Efecto</th>
+                          <th className="p-3">Folio Fiscal (UUID)</th>
+                          <th className="p-3">RFC Emisor / Razón Social</th>
+                          <th className="p-3">RFC Receptor / Razón Social</th>
+                          <th className="p-3">Fecha Emisión</th>
+                          <th className="p-3">Tipo</th>
+                          <th className="p-3">Estado</th>
                           <th className="p-3 text-right">Total ($)</th>
                           <th className="p-3 text-center">Acciones</th>
                         </tr>
@@ -1922,6 +2271,16 @@ export function SatWebService() {
                       <tbody className="divide-y divide-slate-100 font-medium text-slate-800">
                         {facturasResult.facturas
                           .filter((f: any) => {
+                            if (facturaFilters.tipoComprobante !== 'ALL') {
+                              const ef = (f.efectoDelComprobante || f.tipoDeComprobante || f.tipo || '').toUpperCase();
+                              if (!ef.startsWith(facturaFilters.tipoComprobante)) return false;
+                            }
+                            if (facturaFilters.rfcFiltro.trim()) {
+                              const qRfc = facturaFilters.rfcFiltro.trim().toLowerCase();
+                              const em = (f.rfcEmisor || f.rfCemisor || '').toLowerCase();
+                              const rec = (f.rfcReceptor || '').toLowerCase();
+                              if (!em.includes(qRfc) && !rec.includes(qRfc)) return false;
+                            }
                             if (!searchFacturaText.trim()) return true;
                             const query = searchFacturaText.toLowerCase();
                             return (
@@ -1932,297 +2291,267 @@ export function SatWebService() {
                               (f.nombreReceptor || '').toLowerCase().includes(query)
                             );
                           })
-                          .map((f: any, idx: number) => (
-                            <tr key={idx} className="hover:bg-slate-50/80 transition-colors">
-                              <td className="p-3 font-mono text-[11px] text-slate-900 font-semibold max-w-[180px] truncate" title={f.uuid}>
-                                {f.uuid || 'S/N'}
-                              </td>
-                              <td className="p-3 whitespace-nowrap text-slate-600">{f.fechaEmision || f.fecha || 'N/A'}</td>
-                              <td className="p-3 max-w-[160px] truncate">
-                                <div className="font-bold text-slate-900 text-[11px]">{f.rfcEmisor || f.rfCemisor || 'N/A'}</div>
-                                <div className="text-[10px] text-slate-500 truncate">{f.nombreEmisor || f.razonSocialEmisor || ''}</div>
-                              </td>
-                              <td className="p-3 max-w-[160px] truncate">
-                                <div className="font-bold text-slate-900 text-[11px]">{f.rfcReceptor || 'N/A'}</div>
-                                <div className="text-[10px] text-slate-500 truncate">{f.nombreReceptor || f.razonSocialReceptor || ''}</div>
-                              </td>
-                              <td className="p-3">
-                                <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-slate-100 text-slate-700">
-                                  {f.efectoDelComprobante || f.tipoDeComprobante || 'Ingreso'}
-                                </span>
-                              </td>
-                              <td className="p-3 text-right font-mono font-bold text-slate-900 text-xs">
-                                {typeof f.totalNum === 'number' && !isNaN(f.totalNum)
-                                  ? `$${f.totalNum.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                                  : typeof f.total === 'number'
-                                    ? `$${f.total.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                                    : (f.total || '$0.00')}
-                              </td>
-                              <td className="p-3 text-center">
-                                <div className="flex items-center justify-center gap-1.5">
-                                  {f.rawXml && (
+                          .map((f: any, idx: number) => {
+                            const tipoCode = (f.efectoDelComprobante || f.tipoDeComprobante || 'I').substring(0, 1).toUpperCase();
+                            const isCancelado = f.estatus === '0' || f.estadoComprobante === 'Cancelado' || f.isCancelada;
+
+                            return (
+                              <tr key={idx} className="hover:bg-slate-50/80 transition-colors">
+                                <td className="p-3 font-mono text-[11px] text-slate-900 font-semibold max-w-[170px] truncate" title={f.uuid}>
+                                  <div className="flex items-center gap-1.5">
                                     <button
-                                      onClick={() => setSelectedXmlModal({ fileName: f.fileName || `${f.uuid}.xml`, content: f.rawXml })}
-                                      className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-[11px] inline-flex items-center gap-1"
-                                      title="Ver XML"
+                                      type="button"
+                                      onClick={() => {
+                                        navigator.clipboard.writeText(f.uuid || '');
+                                        setSuccessMessage(`UUID copiado al portapapeles: ${f.uuid}`);
+                                      }}
+                                      className="text-slate-400 hover:text-slate-700"
+                                      title="Copiar UUID"
                                     >
-                                      <Eye className="w-3.5 h-3.5" />
+                                      <Copy className="w-3 h-3" />
                                     </button>
-                                  )}
-                                  {f.rawXml && (
-                                    <button
-                                      onClick={() => downloadTextFile(f.rawXml, f.fileName || `${f.uuid}.xml`)}
-                                      className="p-1.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold text-[11px] inline-flex items-center gap-1"
-                                      title="Descargar XML"
-                                    >
-                                      <Download className="w-3.5 h-3.5" />
-                                    </button>
-                                  )}
-                                </div>
-                              </td>
-                            </tr>
-                          ))}
+                                    <span className="truncate">{f.uuid || 'S/N'}</span>
+                                  </div>
+                                </td>
+
+                                <td className="p-3 max-w-[170px] truncate">
+                                  <div className="font-bold text-slate-900 text-[11px] font-mono">{f.rfcEmisor || f.rfCemisor || 'N/A'}</div>
+                                  <div className="text-[10px] text-slate-500 truncate" title={f.nombreEmisor || f.razonSocialEmisor}>{f.nombreEmisor || f.razonSocialEmisor || 'N/A'}</div>
+                                </td>
+
+                                <td className="p-3 max-w-[170px] truncate">
+                                  <div className="font-bold text-slate-900 text-[11px] font-mono">{f.rfcReceptor || 'N/A'}</div>
+                                  <div className="text-[10px] text-slate-500 truncate" title={f.nombreReceptor || f.razonSocialReceptor}>{f.nombreReceptor || f.razonSocialReceptor || 'N/A'}</div>
+                                </td>
+
+                                <td className="p-3 whitespace-nowrap text-slate-600 font-mono text-[11px]">{f.fechaEmision || f.fecha || 'N/A'}</td>
+
+                                <td className="p-3 whitespace-nowrap">
+                                  <span className={`px-2 py-0.5 rounded-md text-[10px] font-extrabold ${
+                                    tipoCode === 'I' ? 'bg-emerald-100 text-emerald-800' :
+                                    tipoCode === 'E' ? 'bg-amber-100 text-amber-800' :
+                                    tipoCode === 'P' ? 'bg-purple-100 text-purple-800' :
+                                    tipoCode === 'N' ? 'bg-blue-100 text-blue-800' :
+                                    'bg-slate-100 text-slate-800'
+                                  }`}>
+                                    {tipoCode === 'I' ? 'Ingreso' : tipoCode === 'E' ? 'Egreso' : tipoCode === 'P' ? 'Pago' : tipoCode === 'N' ? 'Nómina' : 'Traslado'}
+                                  </span>
+                                </td>
+
+                                <td className="p-3 whitespace-nowrap">
+                                  <span className={`px-2 py-0.5 rounded-md text-[10px] font-extrabold ${
+                                    isCancelado ? 'bg-rose-100 text-rose-800' : 'bg-emerald-50 text-emerald-700'
+                                  }`}>
+                                    {isCancelado ? 'Cancelado' : 'Vigente'}
+                                  </span>
+                                </td>
+
+                                <td className="p-3 text-right font-mono font-bold text-slate-900 text-xs whitespace-nowrap">
+                                  {typeof f.totalNum === 'number' && !isNaN(f.totalNum)
+                                    ? `$${f.totalNum.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                                    : typeof f.total === 'number'
+                                      ? `$${f.total.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                                      : (f.total || '$0.00')}
+                                </td>
+
+                                <td className="p-3 text-center whitespace-nowrap">
+                                  <div className="flex items-center justify-center gap-1.5">
+                                    {f.rawXml ? (
+                                      <>
+                                        <button
+                                          onClick={() => downloadTextFile(f.rawXml, f.fileName || `${f.uuid || 'Factura'}.xml`)}
+                                          className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[10px] inline-flex items-center gap-1 shadow-2xs transition-all"
+                                          title="Descargar XML Individual"
+                                        >
+                                          <Download className="w-3.5 h-3.5" /> Descargar XML
+                                        </button>
+                                        <button
+                                          onClick={() => setSelectedXmlModal({ fileName: f.fileName || `${f.uuid}.xml`, content: f.rawXml })}
+                                          className="p-1.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold text-[11px] inline-flex items-center gap-1"
+                                          title="Ver Representación PDF / Vista Previa"
+                                        >
+                                          <FileText className="w-3.5 h-3.5" />
+                                        </button>
+                                      </>
+                                    ) : (
+                                      <span className="text-[10px] text-slate-400 italic">Metadata (Sin XML)</span>
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
                       </tbody>
                     </table>
                   </div>
                 </div>
               ) : (facturasResult.estadoSolicitud === 'Rechazada' || facturasResult.estadoSolicitud === 'Error' || facturasResult.estadoSolicitud === 'Vencida') ? (
-                /* CASE 2: Solicitud Rechazada o Error por el SAT */
-                <div className="space-y-6">
-                  <div className="p-6 rounded-2xl bg-rose-50 border border-rose-200/90 space-y-4">
-                    <div className="flex items-start gap-3">
-                      <div className="p-2.5 rounded-xl bg-rose-100 text-rose-800 shrink-0 mt-0.5">
-                        <AlertCircle className="w-6 h-6" />
-                      </div>
-                      <div className="space-y-2 flex-1">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <h4 className="font-bold text-rose-950 text-base flex items-center gap-2">
-                            <span>Solicitud {facturasResult.estadoSolicitud || 'Rechazada'} por el SAT</span>
-                            <span className="px-2.5 py-0.5 rounded-full text-xs font-black bg-rose-200 text-rose-900 uppercase tracking-wider">
-                              Estatus: {facturasResult.estadoSolicitud}
-                            </span>
-                          </h4>
-                        </div>
-
-                        <p className="text-xs text-rose-900 leading-relaxed font-medium">
-                          {facturasResult.mensaje || 'La solicitud fue rechazada por los servidores del SAT.'}
-                        </p>
-
-                        <div className="text-[11px] text-rose-800 bg-rose-100/60 p-3 rounded-xl border border-rose-200 space-y-1 font-mono">
-                          <div>• Folio de Solicitud SAT: <strong>{facturasResult.idSolicitud}</strong></div>
-                          <div>• Código de Respuesta: <strong>{facturasResult.codEstatus}</strong></div>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="pt-3 border-t border-rose-200/60 flex flex-wrap items-center justify-end gap-3">
-                      <button
-                        onClick={() => {
-                          setFacturaFilters(prev => ({ ...prev, tipoBusqueda: '2' }));
-                          setTimeout(() => handleConsultarFacturas(), 100);
-                        }}
-                        disabled={isConsultingFacturas}
-                        className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs inline-flex items-center gap-1.5 transition-all"
-                      >
-                        <FileText className="w-3.5 h-3.5" /> Cambiar a Modo "Metadata"
-                      </button>
-
-                      <button
-                        onClick={handleConsultarFacturas}
-                        disabled={isConsultingFacturas}
-                        className="px-5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs inline-flex items-center gap-1.5 shadow-sm transition-all"
-                      >
-                        <RefreshCw className={`w-3.5 h-3.5 ${isConsultingFacturas ? 'animate-spin' : ''}`} /> Reintentar Consulta
-                      </button>
-                    </div>
+                <div className="space-y-4">
+                  <div className="p-5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-900 space-y-2">
+                    <h4 className="font-bold text-sm">Error en Consulta Portal SAT</h4>
+                    <p className="text-xs">{facturasResult.mensaje || 'Error al conectar con los servidores del SAT.'}</p>
                   </div>
-
-                  <details className="text-xs text-slate-500">
-                    <summary className="cursor-pointer font-semibold hover:text-slate-700 py-1">
-                      Ver detalle técnico de la respuesta del SAT
-                    </summary>
-                    <pre className="p-3 mt-2 bg-slate-900 text-emerald-400 font-mono text-[11px] overflow-auto max-h-48 rounded-xl">
-                      {JSON.stringify(facturasResult, null, 2)}
-                    </pre>
-                  </details>
-                </div>
-              ) : facturasResult.estadoSolicitud === 'Terminada' ? (
-                /* CASE 3: Facturas array is empty and SAT completed query (0 facturas in range) */
-                <div className="space-y-6">
-                  <div className="p-6 rounded-2xl bg-slate-50 border border-slate-200 space-y-4 shadow-xs">
-                    <div className="flex items-start gap-3.5">
-                      <div className="p-3 rounded-2xl bg-indigo-50 text-indigo-700 shrink-0 mt-0.5 border border-indigo-100">
-                        <CheckCircle2 className="w-6 h-6 text-indigo-600" />
-                      </div>
-                      <div className="space-y-2 flex-1">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <h4 className="font-bold text-slate-900 text-base flex items-center gap-2">
-                            <span>Sincronización Concluida - Sin comprobantes en el periodo</span>
-                            <span className="px-2.5 py-0.5 rounded-full text-xs font-black bg-emerald-100 text-emerald-800 uppercase tracking-wider">
-                              Estatus SAT: Concluido
-                            </span>
-                          </h4>
-                        </div>
-
-                        <p className="text-xs text-slate-700 leading-relaxed font-medium">
-                          {facturasResult.mensaje || `El Web Service del SAT procesó el Folio de Solicitud ${facturasResult.idSolicitud || ''} y no encontró facturas ${facturaFilters.tipo === 'emitidos' ? 'emitidas' : 'recibidas'} para las fechas seleccionadas (${facturaFilters.fecha_inicial} a ${facturaFilters.fecha_final}).`}
-                        </p>
-
-                        <div className="bg-white p-3.5 rounded-xl border border-slate-200 text-xs text-slate-600 space-y-2">
-                          <div className="font-bold text-slate-800 flex items-center gap-1.5">
-                            <Zap className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
-                            <span>Sugerencias para verificar su búsqueda:</span>
-                          </div>
-                          <ul className="list-disc list-inside space-y-1 text-[11px] text-slate-600 pl-1">
-                            <li>
-                              Actualmente consultó <strong>Facturas {facturaFilters.tipo === 'emitidos' ? 'Emitidas (sus ventas)' : 'Recibidas (sus gastos)'}</strong>. Si busca sus {facturaFilters.tipo === 'emitidos' ? 'gastos/compras' : 'ventas/ingresos'}, cambie el filtro a <strong>Facturas {facturaFilters.tipo === 'emitidos' ? 'Recibidas' : 'Emitidas'}</strong>.
-                            </li>
-                            <li>Verifique que la FIEL cargada (.cer / .key) corresponda exactamente al RFC de la empresa o contribuyente que emitió o recibió las facturas.</li>
-                            <li>Si busca facturas canceladas, asegúrese de seleccionar en "Estatus del CFDI" la opción "Todos los Estatus" o "Cancelados".</li>
-                          </ul>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="pt-3 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const newTipo = facturaFilters.tipo === 'recibidos' ? 'emitidos' : 'recibidos';
-                          setFacturaFilters(prev => ({ ...prev, tipo: newTipo }));
-                          setTimeout(() => handleConsultarFacturas(), 100);
-                        }}
-                        disabled={isConsultingFacturas}
-                        className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs inline-flex items-center gap-1.5 shadow-sm transition-all"
-                      >
-                        <RefreshCw className="w-3.5 h-3.5" /> Consultar Facturas {facturaFilters.tipo === 'recibidos' ? 'Emitidas' : 'Recibidas'}
-                      </button>
-
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setFacturaFilters(prev => ({ ...prev, tipoBusqueda: '2' }));
-                            setTimeout(() => handleConsultarFacturas(), 100);
-                          }}
-                          disabled={isConsultingFacturas}
-                          className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-900 text-white font-bold text-xs inline-flex items-center gap-1.5 transition-all"
-                        >
-                          <FileText className="w-3.5 h-3.5" /> Modo Metadata
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-
-                  <details className="text-xs text-slate-500">
-                    <summary className="cursor-pointer font-semibold hover:text-slate-700 py-1">
-                      Ver detalle técnico de la respuesta del SAT
-                    </summary>
-                    <pre className="p-3 mt-2 bg-slate-900 text-emerald-400 font-mono text-[11px] overflow-auto max-h-48 rounded-xl">
-                      {JSON.stringify(facturasResult, null, 2)}
-                    </pre>
-                  </details>
                 </div>
               ) : (
-                /* CASE 4: Facturas array is empty, but idSolicitud is active/in process */
-                <div className="space-y-6">
-                  <div className="p-6 rounded-2xl bg-amber-50/90 border border-amber-200/90 space-y-4 shadow-xs">
-                    <div className="flex items-start gap-3.5">
-                      <div className="p-3 rounded-2xl bg-amber-100/80 text-amber-900 shrink-0 mt-0.5 border border-amber-200">
-                        <Clock className="w-6 h-6 animate-spin text-amber-700" />
-                      </div>
-                      <div className="space-y-2 flex-1">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <h4 className="font-bold text-amber-950 text-base flex items-center gap-2">
-                            <span>Solicitud Registrada en el Web Service del SAT</span>
-                            <span className="px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-200 text-amber-900 uppercase tracking-wider">
-                              {facturasResult.estadoSolicitud || 'En Proceso'}
-                            </span>
-                          </h4>
-
-                          {autoPollActive && (
-                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-amber-200/80 text-amber-950 border border-amber-300 animate-pulse">
-                              <RefreshCw className="w-3 h-3 animate-spin text-amber-800" />
-                              Auto-Sincronización Activa (cada 6s)
-                            </span>
-                          )}
-                        </div>
-
-                        <p className="text-xs text-amber-950 leading-relaxed font-medium">
-                          El servicio web del SAT asignó el Folio de Solicitud{' '}
-                          <strong className="font-mono bg-amber-100/90 px-2 py-0.5 rounded text-amber-950 border border-amber-300">
-                            {facturasResult.idSolicitud}
-                          </strong>
-                          . Los servidores del SAT están generando los paquetes ZIP de forma asíncrona.
-                        </p>
-
-                        <div className="bg-amber-100/50 p-3 rounded-xl border border-amber-200/80 text-[11px] text-amber-900 space-y-1">
-                          <div className="font-bold flex items-center gap-1.5">
-                            <Zap className="w-3.5 h-3.5 text-amber-700 shrink-0" />
-                            <span>¿Por qué ocurre esto?</span>
-                          </div>
-                          <p>
-                            El SAT procesa descargas masivas en su servidor central de empaquetado. El sistema verifica automáticamente cada 6 segundos hasta que el SAT concluye y descarga todos los comprobantes XML a su pantalla sin que tenga que hacer nada.
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="pt-3 border-t border-amber-200/70 flex flex-col sm:flex-row items-center justify-between gap-4">
-                      <label className="inline-flex items-center gap-2 text-xs font-bold text-amber-950 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={autoPollActive}
-                          onChange={(e) => setAutoPollActive(e.target.checked)}
-                          className="w-4 h-4 text-amber-600 rounded border-amber-300 focus:ring-amber-500"
-                        />
-                        <span>🔄 Verificar estatus en segundo plano automáticamente</span>
-                      </label>
-
-                      <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
-                        <button
-                          onClick={() => {
-                            setFacturaFilters(prev => ({ ...prev, tipoBusqueda: '2' }));
-                            setTimeout(() => handleConsultarFacturas(), 100);
-                          }}
-                          disabled={isConsultingFacturas}
-                          className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs inline-flex items-center gap-1.5 transition-all"
-                        >
-                          <FileText className="w-3.5 h-3.5" /> Modo Metadata (Resumen Rápido)
-                        </button>
-
-                        <button
-                          onClick={() => handleRevisarEstatusFacturas(facturasResult.idSolicitud)}
-                          disabled={isConsultingFacturas}
-                          className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs shadow-md inline-flex items-center justify-center gap-2 transition-all disabled:opacity-50"
-                        >
-                          {isConsultingFacturas ? (
-                            <>
-                              <RefreshCw className="w-4 h-4 animate-spin" />
-                              Verificando Paquetes en SAT...
-                            </>
-                          ) : (
-                            <>
-                              <RefreshCw className="w-4 h-4" />
-                              Verificar Estatus Ahora
-                            </>
-                          )}
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Technical response drawer preview for transparency */}
-                  <details className="text-xs text-slate-500">
-                    <summary className="cursor-pointer font-semibold hover:text-slate-700 py-1">
-                      Ver detalle técnico de la respuesta del SAT
-                    </summary>
-                    <pre className="p-3 mt-2 bg-slate-900 text-emerald-400 font-mono text-[11px] overflow-auto max-h-48 rounded-xl">
-                      {JSON.stringify(facturasResult, null, 2)}
-                    </pre>
-                  </details>
+                <div className="p-6 rounded-2xl bg-slate-50 border border-slate-200 text-center space-y-2">
+                  <p className="text-sm font-bold text-slate-800">No se encontraron comprobantes para el periodo y filtros seleccionados.</p>
+                  <p className="text-xs text-slate-500">Pruebe ampliando el rango de fechas o cambiando el tipo de consulta (Emitidas / Recibidas).</p>
                 </div>
               )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* MODULO 2: DESCARGA MASIVA (SERVICIO WEB SOAP SAT) */}
+      {activeTab === 'masiva' && (
+        <div className="space-y-6">
+          <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm space-y-6">
+            <div className="flex flex-col md:flex-row md:items-center justify-between border-b border-slate-100 pb-4 gap-4">
+              <div>
+                <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                  <Package className="w-5 h-5 text-indigo-600" />
+                  Servicio Web SAT - Descarga Masiva en Lote (SOAP)
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Módulo de alto volumen para generar solicitudes asíncronas de paquetes comprimidos (.ZIP) mediante los WSDL SOAP oficiales del SAT (<code className="font-mono bg-slate-100 px-1 py-0.5 rounded text-indigo-700">SolicitaDescarga.svc</code>). Ideal para descargas históricas y auditorías contables.
+                </p>
+              </div>
+              <span className="px-3 py-1.5 bg-indigo-50 text-indigo-800 border border-indigo-200 rounded-xl text-xs font-bold shrink-0">
+                📦 Paquetes Masivos comprimidos (.ZIP)
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-slate-700">Tipo de Comprobantes</label>
+                <select
+                  value={wsFilters.tipo}
+                  onChange={(e) => setWsFilters({ ...wsFilters, tipo: e.target.value as any })}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm font-semibold bg-slate-50"
+                >
+                  <option value="recibidos">📥 Recibidos (Gastos/Compras)</option>
+                  <option value="emitidos">📤 Emitidos (Ventas/Ingresos)</option>
+                </select>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-slate-700">Tipo de Búsqueda SOAP</label>
+                <select
+                  value={wsFilters.tipoBusqueda}
+                  onChange={(e) => setWsFilters({ ...wsFilters, tipoBusqueda: e.target.value })}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm font-semibold bg-slate-50"
+                >
+                  <option value="1">CFDI Completos (.XML)</option>
+                  <option value="2">Resumen Metadatos (.TXT)</option>
+                </select>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-slate-700">Fecha Inicial</label>
+                <input
+                  type="date"
+                  value={wsFilters.fecha_inicial}
+                  onChange={(e) => setWsFilters({ ...wsFilters, fecha_inicial: e.target.value })}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm font-semibold bg-slate-50"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-slate-700">Fecha Final</label>
+                <input
+                  type="date"
+                  value={wsFilters.fecha_final}
+                  onChange={(e) => setWsFilters({ ...wsFilters, fecha_final: e.target.value })}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm font-semibold bg-slate-50"
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-end pt-2 border-t border-slate-100">
+              <button
+                onClick={handleSolicitarWs}
+                disabled={isSolicitansoWs}
+                className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-sm shadow-md transition-all disabled:opacity-50"
+              >
+                {isSolicitansoWs ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    Enviando Solicitud SOAP al SAT...
+                  </>
+                ) : (
+                  <>
+                    <Package className="w-4 h-4" />
+                    Solicitar Paquete Masivo al SAT
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+
+          {/* Historial de solicitudes masivas */}
+          {solicitaHistory.length > 0 && (
+            <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm space-y-4">
+              <h4 className="text-sm font-extrabold text-slate-900">Historial de Solicitudes Masivas WSDL SOAP</h4>
+
+              <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-200 font-bold uppercase text-[10px] text-slate-700">
+                      <th className="p-3">ID Solicitud SAT</th>
+                      <th className="p-3">Fecha Solicitud</th>
+                      <th className="p-3">Tipo</th>
+                      <th className="p-3">Rango Fechas</th>
+                      <th className="p-3">Estatus</th>
+                      <th className="p-3 text-center">Acciones</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 font-medium text-slate-800">
+                    {solicitaHistory.map((item, idx) => (
+                      <tr key={idx} className="hover:bg-slate-50">
+                        <td className="p-3 font-mono font-bold text-indigo-700">{item.idSolicitud}</td>
+                        <td className="p-3">{item.fechaSolicitud}</td>
+                        <td className="p-3 capitalize">{item.tipo}</td>
+                        <td className="p-3">{item.rangoFechas}</td>
+                        <td className="p-3">
+                          <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
+                            item.estado === 'Terminada' ? 'bg-emerald-100 text-emerald-800' :
+                            item.estado === 'Rechazada' ? 'bg-rose-100 text-rose-800' :
+                            'bg-amber-100 text-amber-800'
+                          }`}>
+                            {item.estado}
+                          </span>
+                        </td>
+                        <td className="p-3 text-center">
+                          <div className="flex items-center justify-center gap-2">
+                            <button
+                              onClick={() => handleVerificarWs(item.idSolicitud)}
+                              disabled={isVerificandoId === item.idSolicitud}
+                              className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[10px] inline-flex items-center gap-1 shadow-2xs"
+                            >
+                              <RefreshCw className={`w-3 h-3 ${isVerificandoId === item.idSolicitud ? 'animate-spin' : ''}`} />
+                              Verificar Estatus
+                            </button>
+
+                            {item.paquetes && item.paquetes.length > 0 && (
+                              item.paquetes.map((pkgId, pIdx) => (
+                                <button
+                                  key={pIdx}
+                                  onClick={() => handleDescargarPaqueteWs(pkgId)}
+                                  disabled={isDescargandoPkg === pkgId}
+                                  className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[10px] inline-flex items-center gap-1 shadow-2xs"
+                                >
+                                  <Download className="w-3 h-3" /> Descargar Paquete {pIdx + 1}
+                                </button>
+                              ))
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           )}
         </div>
@@ -2607,38 +2936,13 @@ export function SatWebService() {
         </div>
       )}
 
-      {/* MODAL PARA VISUALIZAR XML DE COMPROBANTE */}
+      {/* MODAL PARA VISUALIZAR PDF Y XML DE COMPROBANTE SAT */}
       {selectedXmlModal && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-3xl w-full max-h-[85vh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden">
-            <div className="p-4 border-b border-slate-100 flex items-center justify-between bg-slate-50">
-              <div>
-                <h4 className="font-bold text-slate-900 text-sm flex items-center gap-2">
-                  <FileCode className="w-4 h-4 text-indigo-600" />
-                  {selectedXmlModal.fileName}
-                </h4>
-                <p className="text-[11px] text-slate-500">Comprobante XML oficial firmado por el SAT</p>
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => downloadTextFile(selectedXmlModal.content, selectedXmlModal.fileName)}
-                  className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-lg inline-flex items-center gap-1.5"
-                >
-                  <Download className="w-3.5 h-3.5" /> Descargar XML
-                </button>
-                <button
-                  onClick={() => setSelectedXmlModal(null)}
-                  className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg font-bold text-sm"
-                >
-                  ✕
-                </button>
-              </div>
-            </div>
-            <div className="p-4 overflow-auto bg-slate-900 text-emerald-300 font-mono text-xs flex-1">
-              <pre className="whitespace-pre-wrap break-all">{selectedXmlModal.content}</pre>
-            </div>
-          </div>
-        </div>
+        <CfdiPdfViewerModal
+          xmlContent={selectedXmlModal.content}
+          fileName={selectedXmlModal.fileName}
+          onClose={() => setSelectedXmlModal(null)}
+        />
       )}
     </div>
   );
