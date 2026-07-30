@@ -12,6 +12,33 @@ export interface ConceptoItem {
   objetoImp?: string;
 }
 
+export interface NominaPercepcionItem {
+  tipoPercepcion: string;
+  tipoPercepcionDesc: string;
+  clave: string;
+  concepto: string;
+  importeGravado: number;
+  importeExento: number;
+  total: number;
+}
+
+export interface NominaDeduccionItem {
+  tipoDeduccion: string;
+  tipoDeduccionDesc: string;
+  clave: string;
+  concepto: string;
+  importe: number;
+}
+
+export interface NominaOtroPagoItem {
+  tipoOtroPago: string;
+  tipoOtroPagoDesc: string;
+  clave: string;
+  concepto: string;
+  importe: number;
+  subsidioCausado?: number;
+}
+
 export interface ParsedCFDI {
   fileName: string;
   fileContent?: string;
@@ -87,6 +114,11 @@ export interface ParsedCFDI {
   nominaNeto?: number;
   nominaPercepcionesStr?: string;
   nominaDeduccionesStr?: string;
+
+  // Itemized payroll arrays
+  percepcionesDetalle?: NominaPercepcionItem[];
+  deduccionesDetalle?: NominaDeduccionItem[];
+  otrosPagosDetalle?: NominaOtroPagoItem[];
 
   // Granular payroll breakdown fields
   percepcionSueldo?: number;
@@ -301,6 +333,83 @@ export const getPeriodicidadName = (code: string): string => {
     '99': 'Otra Periodicidad'
   };
   return map[code.trim()] || 'Quincenal';
+};
+
+export const TIPO_PERCEPCION_MAP: Record<string, string> = {
+  '001': 'Sueldos, Salarios Rayas y Jornales',
+  '002': 'Gratificación Anual (Aguinaldo)',
+  '003': 'Participación de los Trabajadores en las Utilidades PTU',
+  '004': 'Reembolso de Gastos Médicos, Dentales y Hospitalarios',
+  '005': 'Fondo de Ahorro',
+  '006': 'Caja de Ahorro',
+  '009': 'Vales de Despensa',
+  '010': 'Pago por Separación',
+  '011': 'Prima por Antigüedad',
+  '012': 'Pagos por Indemnización',
+  '013': 'Reembolso de Gastos de Transporte',
+  '014': 'Subsidio por Incapacidad',
+  '015': 'Becas para Trabajadores y/o Hijos',
+  '019': 'Horas Extra',
+  '020': 'Prima Vacacional',
+  '021': 'Prima Dominical',
+  '022': 'Prima Quinquenal',
+  '023': 'Prima de Antigüedad',
+  '024': 'Comisiones',
+  '028': 'Comisiones',
+  '029': 'Vales de Gasolina',
+  '038': 'Horas Extra',
+  '046': 'Asimilados a Salarios',
+  '049': 'Premios por Puntualidad',
+  '050': 'Premios por Asistencia',
+};
+
+export const TIPO_DEDUCCION_MAP: Record<string, string> = {
+  '001': 'Retención de ISR',
+  '002': 'Aportaciones de Seguridad Social (IMSS)',
+  '003': 'Aportación a Retiro, Cesantía en Edad Avanzada y Vejez',
+  '004': 'Descuento por Crédito de Vivienda (INFONAVIT)',
+  '005': 'Fondo de Ahorro',
+  '006': 'Descuento por Pensión Alimenticia',
+  '007': 'Pago por Crédito FONACOT',
+  '008': 'Cuota Sindical',
+  '009': 'Descuento por Pérdida, Avería o Daño',
+  '010': 'Pago de Abonos INFONAVIT',
+  '011': 'Pago de Abonos FONACOT',
+  '012': 'Descuento por Incapacidad',
+  '020': 'Ausentismo (Faltas)',
+  '021': 'Cuotas Obrero Patronales',
+  '022': 'Impuestos Locales',
+  '023': 'Aportaciones Voluntarias',
+};
+
+export const TIPO_OTRO_PAGO_MAP: Record<string, string> = {
+  '001': 'Subsidio para el Empleo (entregado)',
+  '002': 'Subsidio para el Empleo (causado)',
+  '003': 'Viáticos Entregados al Trabajador',
+  '004': 'Aplicación de Saldo a Favor por Compensación',
+  '005': 'Reembolso de Descuentos Indebidos',
+  '099': 'Por Definir / Otros Pagos',
+};
+
+export const getTipoPercepcionName = (code: string): string => {
+  if (!code) return 'Percepción';
+  const c = code.trim();
+  const pad = c.length === 1 ? '00' + c : c.length === 2 ? '0' + c : c;
+  return TIPO_PERCEPCION_MAP[pad] || TIPO_PERCEPCION_MAP[c] || `Percepción (${code})`;
+};
+
+export const getTipoDeduccionName = (code: string): string => {
+  if (!code) return 'Deducción';
+  const c = code.trim();
+  const pad = c.length === 1 ? '00' + c : c.length === 2 ? '0' + c : c;
+  return TIPO_DEDUCCION_MAP[pad] || TIPO_DEDUCCION_MAP[c] || `Deducción (${code})`;
+};
+
+export const getTipoOtroPagoName = (code: string): string => {
+  if (!code) return 'Otro Pago';
+  const c = code.trim();
+  const pad = c.length === 1 ? '00' + c : c.length === 2 ? '0' + c : c;
+  return TIPO_OTRO_PAGO_MAP[pad] || TIPO_OTRO_PAGO_MAP[c] || `Otro Pago (${code})`;
 };
 
 export const parseXMLData = (xmlText: string, fileName: string): ParsedCFDI => {
@@ -845,7 +954,11 @@ export const parseXMLData = (xmlText: string, fileName: string): ParsedCFDI => {
   let nominaPercepcionesStr = '';
   let nominaDeduccionesStr = '';
 
-  // Payroll detailed parsing
+  // Payroll detailed parsing arrays
+  const percepcionesDetalle: NominaPercepcionItem[] = [];
+  const deduccionesDetalle: NominaDeduccionItem[] = [];
+  const otrosPagosDetalle: NominaOtroPagoItem[] = [];
+
   let percepcionSueldo = 0;
   let percepcionAguinaldoGrav = 0;
   let percepcionAguinaldoExent = 0;
@@ -904,10 +1017,21 @@ export const parseXMLData = (xmlText: string, fileName: string): ParsedCFDI => {
       const percStrArr: string[] = [];
       percElements.forEach(pe => {
         const pType = getAttrSafe(pe, ['TipoPercepcion', 'tipoPercepcion']);
+        const clave = getAttrSafe(pe, ['Clave', 'clave']) || pType;
         const concept = getAttrSafe(pe, ['Concepto', 'concepto']);
         const impGrav = parseFloat(getAttrSafe(pe, ['ImporteGravado', 'importeGravado']) || '0');
         const impExent = parseFloat(getAttrSafe(pe, ['ImporteExento', 'importeExento']) || '0');
         const impTot = impGrav + impExent;
+
+        percepcionesDetalle.push({
+          tipoPercepcion: pType,
+          tipoPercepcionDesc: getTipoPercepcionName(pType),
+          clave,
+          concepto: concept || getTipoPercepcionName(pType),
+          importeGravado: impGrav,
+          importeExento: impExent,
+          total: impTot
+        });
 
         percStrArr.push(`${concept} (${pType}): $${impTot.toFixed(2)}`);
 
@@ -950,8 +1074,17 @@ export const parseXMLData = (xmlText: string, fileName: string): ParsedCFDI => {
       const dedStrArr: string[] = [];
       dedElements.forEach(de => {
         const dType = getAttrSafe(de, ['TipoDeduction', 'tipoDeduccion', 'TipoDeduccion']);
+        const clave = getAttrSafe(de, ['Clave', 'clave']) || dType;
         const concept = getAttrSafe(de, ['Concepto', 'concepto']);
         const importe = parseFloat(getAttrSafe(de, ['Importe', 'importe']) || '0');
+
+        deduccionesDetalle.push({
+          tipoDeduccion: dType,
+          tipoDeduccionDesc: getTipoDeduccionName(dType),
+          clave,
+          concepto: concept || getTipoDeduccionName(dType),
+          importe
+        });
 
         dedStrArr.push(`${concept} (${dType}): $${importe.toFixed(2)}`);
 
@@ -969,6 +1102,30 @@ export const parseXMLData = (xmlText: string, fileName: string): ParsedCFDI => {
         }
       });
       nominaDeduccionesStr = dedStrArr.join(' | ');
+    }
+
+    // OtrosPagos breakdown
+    const otrosPagosEl = getElementSafe(nominaEl, ['nomina12:OtrosPagos', 'OtrosPagos', 'nomina11:OtrosPagos', 'nomina:OtrosPagos']);
+    if (otrosPagosEl) {
+      const opElements = getElementsSafe(otrosPagosEl, ['nomina12:OtroPago', 'OtroPago', 'nomina11:OtroPago', 'nomina:OtroPago']);
+      opElements.forEach(op => {
+        const opType = getAttrSafe(op, ['TipoOtroPago', 'tipoOtroPago']);
+        const clave = getAttrSafe(op, ['Clave', 'clave']) || opType;
+        const concept = getAttrSafe(op, ['Concepto', 'concepto']);
+        const importe = parseFloat(getAttrSafe(op, ['Importe', 'importe']) || '0');
+
+        const subsidioEl = getElementSafe(op, ['nomina12:SubsidioAlEmpleo', 'SubsidioAlEmpleo']);
+        const subsidioCausado = subsidioEl ? parseFloat(getAttrSafe(subsidioEl, ['SubsidioCausado', 'subsidioCausado']) || '0') : undefined;
+
+        otrosPagosDetalle.push({
+          tipoOtroPago: opType,
+          tipoOtroPagoDesc: getTipoOtroPagoName(opType),
+          clave,
+          concepto: concept || getTipoOtroPagoName(opType),
+          importe,
+          subsidioCausado
+        });
+      });
     }
   }
 
@@ -1066,6 +1223,11 @@ export const parseXMLData = (xmlText: string, fileName: string): ParsedCFDI => {
     nominaNeto,
     nominaPercepcionesStr,
     nominaDeduccionesStr,
+
+    // Itemized array details for PDF and visual renderers
+    percepcionesDetalle,
+    deduccionesDetalle,
+    otrosPagosDetalle,
 
     // Detailed parsed payroll items
     percepcionSueldo,
