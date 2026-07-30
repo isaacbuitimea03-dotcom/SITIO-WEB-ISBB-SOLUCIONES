@@ -417,6 +417,42 @@ export function parseSatMetadataTxt(txtContent: string, fileName: string): any[]
   return results;
 }
 
+interface SolicitudCacheEntry {
+  idSolicitud: string;
+  rfc: string;
+  tipo: string;
+  requestType: string;
+  startDateStr: string;
+  endDateStr: string;
+  createdAt: number;
+}
+const recentSolicitudesCache: SolicitudCacheEntry[] = [];
+
+function storeSolicitudInCache(entry: SolicitudCacheEntry) {
+  const cutoff = Date.now() - 15 * 60 * 1000;
+  for (let i = recentSolicitudesCache.length - 1; i >= 0; i--) {
+    if (recentSolicitudesCache[i].createdAt < cutoff) {
+      recentSolicitudesCache.splice(i, 1);
+    }
+  }
+  recentSolicitudesCache.push(entry);
+}
+
+function findMatchingCachedSolicitud(rfc: string, tipo: string, reqType: string, startStr: string, endStr: string): string | null {
+  const cutoff = Date.now() - 15 * 60 * 1000;
+  const cleanRfc = (rfc || '').toUpperCase().trim();
+  for (let i = recentSolicitudesCache.length - 1; i >= 0; i--) {
+    const item = recentSolicitudesCache[i];
+    if (item.createdAt < cutoff) continue;
+    if (item.rfc === cleanRfc && item.tipo === tipo && item.requestType === reqType) {
+      if (item.startDateStr === startStr && item.endDateStr === endStr) {
+        return item.idSolicitud;
+      }
+    }
+  }
+  return null;
+}
+
 export async function solicitaDescargaDirect(
   creds: FielCredentials,
   params: {
@@ -429,10 +465,18 @@ export async function solicitaDescargaDirect(
     estadoComprobante?: string;
   }
 ) {
+  const qId = `sat-qry-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+  const startTime = Date.now();
+  const getElapsed = () => `${Date.now() - startTime}ms`;
+
+  console.log(`[SAT LOG ${new Date().toISOString()}] [SearchID: ${qId}] [Elapsed: 0ms] Nueva consulta iniciada. Periodo: ${params.fecha_inicial} a ${params.fecha_final}, Tipo: ${params.tipo || 'recibidos'}.`);
+
   const fiel = createFielInstance(creds);
   const requestBuilder = new FielRequestBuilder(fiel);
   const webClient = getSharedWebClient();
   const service = new Service(requestBuilder, webClient);
+
+  console.log(`[SAT LOG ${new Date().toISOString()}] [SearchID: ${qId}] [Elapsed: ${getElapsed()}] Nuevo Cliente SAT creado. Credenciales FIEL validadas para RFC: ${creds.rfc}.`);
 
   let startDateStr = formatSatDate(params.fecha_inicial, 'start');
   let endDateStr = formatSatDate(params.fecha_final, 'end');
@@ -499,12 +543,12 @@ export async function solicitaDescargaDirect(
     queryParams = queryParams.withRfcMatch(RfcMatch.create(params.rfcReceptor.toUpperCase()));
   }
 
-  console.log(`[SAT Direct] Enviando SolicitaDescarga (${params.tipo || 'recibidos'})...`);
+  console.log(`[SAT LOG ${new Date().toISOString()}] [SearchID: ${qId}] [Elapsed: ${getElapsed()}] Enviando SolicitaDescarga a la API SOAP del SAT...`);
   let queryResult;
   try {
     queryResult = await service.query(queryParams);
   } catch (errQuery: any) {
-    console.warn('[SAT Direct] Error enviando query a SAT:', errQuery);
+    console.warn(`[SAT LOG ${new Date().toISOString()}] [SearchID: ${qId}] [Elapsed: ${getElapsed()}] Error enviando query a SAT:`, errQuery);
     throw errQuery;
   }
 
@@ -513,17 +557,58 @@ export async function solicitaDescargaDirect(
   const message = status.getMessage();
   const requestId = queryResult.getRequestId();
 
+  console.log(`[SAT LOG ${new Date().toISOString()}] [SearchID: ${qId}] [Elapsed: ${getElapsed()}] Respuesta recibida del SAT. CodEstatus: ${code}, IdSolicitud: "${requestId || ''}", Mensaje: "${message || ''}"`);
+
   if (code !== 5000 && !requestId) {
     if (code === 5005) {
-      console.log(`[SAT Direct] Código 5005 (solicitud idéntica en proceso). Reintentando en 2.5s...`);
-      await new Promise(r => setTimeout(r, 2500));
+      const downloadTypeVal = downloadType.value();
+      const requestTypeVal = requestType.value();
+      const cachedId = findMatchingCachedSolicitud(creds.rfc, downloadTypeVal, requestTypeVal, startDateStr, endDateStr);
+      if (cachedId) {
+        console.log(`[SAT LOG ${new Date().toISOString()}] [SearchID: ${qId}] [Elapsed: ${getElapsed()}] Código 5005 detectado. Reutilizando ID de solicitud previamente registrada en proceso: ${cachedId}`);
+        return {
+          idSolicitud: cachedId,
+          codEstatus: 5000,
+          mensaje: 'Reutilizando solicitud en proceso previa registrada en el SAT.',
+          estadoSolicitud: 1,
+          success: true
+        };
+      }
+
+      console.log(`[SAT LOG ${new Date().toISOString()}] [SearchID: ${qId}] [Elapsed: ${getElapsed()}] Código 5005 detectado. Reintentando con ajuste de offset (1s)...`);
+      await new Promise(r => setTimeout(r, 1500));
       try {
-        const retryRes = await service.query(queryParams);
+        const adjustedEndDate = endDateStr.endsWith('59')
+          ? endDateStr.replace(/59$/, '58')
+          : endDateStr.replace(/(\d\d)$/, (m) => String((parseInt(m, 10) + 1) % 60).padStart(2, '0'));
+        const altPeriod = DateTimePeriod.create(
+          DateTime.create(startDateStr),
+          DateTime.create(adjustedEndDate)
+        );
+        const altQueryParams = QueryParameters.create()
+          .withPeriod(altPeriod)
+          .withDownloadType(downloadType)
+          .withRequestType(requestType);
+
+        const retryRes = await service.query(altQueryParams);
         const retryCode = retryRes.getStatus().getCode();
         const retryReqId = retryRes.getRequestId();
         if (retryReqId || retryCode === 5000) {
+          const finalId = retryReqId || '';
+          if (finalId) {
+            storeSolicitudInCache({
+              idSolicitud: finalId,
+              rfc: creds.rfc.toUpperCase().trim(),
+              tipo: downloadTypeVal,
+              requestType: requestTypeVal,
+              startDateStr,
+              endDateStr,
+              createdAt: Date.now()
+            });
+          }
+          console.log(`[SAT LOG ${new Date().toISOString()}] [SearchID: ${qId}] [Elapsed: ${getElapsed()}] Reintento con ajuste exitoso. IdSolicitud: ${finalId}`);
           return {
-            idSolicitud: retryReqId,
+            idSolicitud: finalId,
             codEstatus: retryCode,
             mensaje: retryRes.getStatus().getMessage() || 'Solicitud recibida con éxito en el SAT.',
             estadoSolicitud: 1,
@@ -531,7 +616,7 @@ export async function solicitaDescargaDirect(
           };
         }
       } catch (eRetry) {
-        console.warn('[SAT Direct] Reintento tras 5005 falló:', eRetry);
+        console.warn(`[SAT LOG ${new Date().toISOString()}] [SearchID: ${qId}] [Elapsed: ${getElapsed()}] Reintento tras 5005 falló:`, eRetry);
       }
 
       return {
@@ -544,6 +629,7 @@ export async function solicitaDescargaDirect(
     }
 
     if (code === 5004) {
+      console.log(`[SAT LOG ${new Date().toISOString()}] [SearchID: ${qId}] [Elapsed: ${getElapsed()}] Código 5004 (Sin comprobantes en el periodo).`);
       return {
         idSolicitud: '',
         codEstatus: 5004,
@@ -554,6 +640,18 @@ export async function solicitaDescargaDirect(
     }
 
     throw new Error(`[SAT Servicio Web - ${code}] ${message || 'Error al enviar solicitud al SAT.'}`);
+  }
+
+  if (requestId) {
+    storeSolicitudInCache({
+      idSolicitud: requestId,
+      rfc: creds.rfc.toUpperCase().trim(),
+      tipo: downloadType.value(),
+      requestType: requestType.value(),
+      startDateStr,
+      endDateStr,
+      createdAt: Date.now()
+    });
   }
 
   return {
@@ -572,6 +670,19 @@ export async function verificaSolicitudDirect(
   creds: FielCredentials,
   idSolicitud: string
 ) {
+  if (!idSolicitud || !idSolicitud.trim()) {
+    return {
+      idSolicitud: '',
+      estadoSolicitud: 2,
+      estadoSolicitudTexto: 'En Proceso',
+      codigoEstadoSolicitud: 5005,
+      mensajeCodigoEstadoSolicitud: 'Esperando ID de solicitud válido del SAT.',
+      idsPaquetes: [],
+      numeroCFDIs: 0,
+      success: false
+    };
+  }
+
   if (inFlightVerifications.has(idSolicitud)) {
     console.log(`[SAT Direct] Reutilizando respuesta de verificación en vuelo para solicitud ${idSolicitud}...`);
     return await inFlightVerifications.get(idSolicitud)!;

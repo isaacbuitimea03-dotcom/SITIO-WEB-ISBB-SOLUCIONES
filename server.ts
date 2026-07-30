@@ -36,26 +36,34 @@ app.use('/api', bankRouter);
 
 // Catch-all middleware for any unmatched API endpoints
 // Guarantees a JSON response and prevents falling through to Vite/index.html
-app.use([
-  '/api*',
-  '/sat*',
-  '/ai*',
-  '/bank*',
-  '/csf*',
-  '/facfiel*',
-  '/solicita*',
-  '/verifica*',
-  '/descarga*',
-  '/efos*',
-  '/ocfiel*',
-  '/retencionfiel*',
-  '/informacionfiscalfiel*',
-  '/analyze*'
-], (req: Request, res: Response) => {
-  res.setHeader('Content-Type', 'application/json');
-  return res.status(404).json({
-    error: `Ruta de API no encontrada o método no permitido: ${req.method} ${req.originalUrl}`
-  });
+app.use((req: Request, res: Response, next: any) => {
+  const url = req.originalUrl || req.url || '';
+  const reqPath = req.path || '';
+  
+  const isApiRoute = 
+    reqPath.startsWith('/api') || 
+    reqPath.startsWith('/sat') || 
+    reqPath.startsWith('/ai') || 
+    reqPath.startsWith('/bank') || 
+    reqPath.startsWith('/csf') || 
+    reqPath.startsWith('/facfiel') || 
+    reqPath.startsWith('/solicita') || 
+    reqPath.startsWith('/verifica') || 
+    reqPath.startsWith('/descarga') || 
+    reqPath.startsWith('/efos') || 
+    reqPath.startsWith('/ocfiel') || 
+    reqPath.startsWith('/retencionfiel') || 
+    reqPath.startsWith('/informacionfiscalfiel') || 
+    reqPath.startsWith('/consultar') || 
+    reqPath.startsWith('/analyze');
+
+  if (isApiRoute) {
+    res.setHeader('Content-Type', 'application/json');
+    return res.status(404).json({
+      error: `Ruta de API no encontrada o método no permitido: ${req.method} ${url}`
+    });
+  }
+  next();
 });
 
 // Global error handling middleware for API routes to guarantee JSON response

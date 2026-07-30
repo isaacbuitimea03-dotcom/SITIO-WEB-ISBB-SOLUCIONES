@@ -183,10 +183,13 @@ export function SatWebService() {
     return msg;
   };
 
-  // Helper for fetching with automatic retries on transient network errors
+  // Helper for fetching with automatic retries on transient network errors, with AbortSignal support
   const fetchWithRetry = async (url: string, options?: RequestInit, maxRetries = 2, delayMs = 1000): Promise<Response> => {
     let lastError: any = null;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      if (options?.signal?.aborted) {
+        throw new DOMException('The user aborted a request.', 'AbortError');
+      }
       try {
         const res = await fetch(url, options);
         // Retry on transient server errors (502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout)
@@ -198,6 +201,9 @@ export function SatWebService() {
         }
         return res;
       } catch (err: any) {
+        if (err?.name === 'AbortError' || options?.signal?.aborted) {
+          throw err;
+        }
         lastError = err;
         const msg = String(err?.message || '');
         const isNetworkOrTimeout = err?.name === 'TypeError' ||
@@ -605,6 +611,51 @@ export function SatWebService() {
   });
   const isPollingInFlightRef = useRef(false);
 
+  // References for request cancellation and worker cleanup
+  const activeAbortControllerRef = useRef<AbortController | null>(null);
+  const activeSearchIdRef = useRef<number>(0);
+  const pollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const cancelAndCleanupPreviousQuery = () => {
+    // 1. Cancel previous HTTP requests
+    if (activeAbortControllerRef.current) {
+      try {
+        activeAbortControllerRef.current.abort();
+      } catch {
+        // ignore
+      }
+      activeAbortControllerRef.current = null;
+    }
+
+    // 2. Increment search ID to invalidate any background async loops
+    activeSearchIdRef.current++;
+
+    // 3. Clear pending poll timers
+    if (pollTimeoutRef.current) {
+      clearTimeout(pollTimeoutRef.current);
+      pollTimeoutRef.current = null;
+    }
+
+    // 4. Reset poll flags and metrics
+    isPollingInFlightRef.current = false;
+    setAutoPollActive(false);
+    setSyncMetrics(prev => ({
+      ...prev,
+      active: false,
+      message: 'Consulta previa cancelada.'
+    }));
+
+    // 5. Clear batch progress state
+    setBatchSyncInfo(null);
+  };
+
+  // Unmount cleanup
+  useEffect(() => {
+    return () => {
+      cancelAndCleanupPreviousQuery();
+    };
+  }, []);
+
   const startSyncMetrics = (idSolicitud: string, initialStatus = 'En Proceso') => {
     setSyncMetrics({
       active: true,
@@ -983,7 +1034,10 @@ export function SatWebService() {
     }
   };
 
-  function splitDateRangeIntoMonths(startDateStr: string, endDateStr: string): { start: string; end: string; label: string }[] {
+  function splitDateRangeIntoIntervals(
+    startDateStr: string,
+    endDateStr: string
+  ): { start: string; end: string; label: string }[] {
     let s = startDateStr;
     let e = endDateStr;
 
@@ -999,27 +1053,47 @@ export function SatWebService() {
       return [{ start: s, end: e, label: `${s} a ${e}` }];
     }
 
-    const monthNames = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
+    const monthNames = [
+      'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+      'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'
+    ];
     const pad = (n: number) => String(n).padStart(2, '0');
 
-    const months: { start: string; end: string; label: string }[] = [];
+    const intervals: { start: string; end: string; label: string }[] = [];
 
     let currY = sY;
     let currM = sM;
 
     while (currY < eY || (currY === eY && currM <= eM)) {
-      const startDay = (currY === sY && currM === sM) ? sD : 1;
       const maxDaysInMonth = new Date(currY, currM, 0).getDate();
-      const endDay = (currY === eY && currM === eM) ? Math.min(eD, maxDaysInMonth) : maxDaysInMonth;
 
-      const validStartDay = Math.min(startDay, maxDaysInMonth);
-      const validEndDay = Math.max(validStartDay, endDay);
+      // Half 1: Day 1 to 15
+      const q1StartDay = (currY === sY && currM === sM) ? sD : 1;
+      const q1EndDay = (currY === eY && currM === eM) ? Math.min(eD, 15) : 15;
 
-      const periodStart = `${currY}-${pad(currM)}-${pad(validStartDay)}`;
-      const periodEnd = `${currY}-${pad(currM)}-${pad(validEndDay)}`;
-      const label = `${monthNames[currM - 1]} ${currY}`;
+      if (q1StartDay <= q1EndDay && q1StartDay <= 15) {
+        const startStr = `${currY}-${pad(currM)}-${pad(q1StartDay)}`;
+        const endStr = `${currY}-${pad(currM)}-${pad(q1EndDay)}`;
+        intervals.push({
+          start: startStr,
+          end: endStr,
+          label: `${monthNames[currM - 1]} 1a Quincena ${currY} (${pad(q1StartDay)} al ${pad(q1EndDay)})`
+        });
+      }
 
-      months.push({ start: periodStart, end: periodEnd, label });
+      // Half 2: Day 16 to end of month
+      const q2StartDay = (currY === sY && currM === sM) ? Math.max(sD, 16) : 16;
+      const q2EndDay = (currY === eY && currM === eM) ? Math.min(eD, maxDaysInMonth) : maxDaysInMonth;
+
+      if (q2StartDay <= q2EndDay && q2StartDay <= maxDaysInMonth) {
+        const startStr = `${currY}-${pad(currM)}-${pad(q2StartDay)}`;
+        const endStr = `${currY}-${pad(currM)}-${pad(q2EndDay)}`;
+        intervals.push({
+          start: startStr,
+          end: endStr,
+          label: `${monthNames[currM - 1]} 2a Quincena ${currY} (${pad(q2StartDay)} al ${pad(q2EndDay)})`
+        });
+      }
 
       currM++;
       if (currM > 12) {
@@ -1028,10 +1102,19 @@ export function SatWebService() {
       }
     }
 
-    return months.length > 0 ? months : [{ start: s, end: e, label: `${s} a ${e}` }];
+    return intervals.length > 0 ? intervals : [{ start: s, end: e, label: `${s} a ${e}` }];
   }
 
   const handleConsultarFacturas = async () => {
+    // 1. Fully cancel and clean up any active search or polling loop
+    cancelAndCleanupPreviousQuery();
+
+    // 2. Initialize new AbortController and Search ID
+    const abortController = new AbortController();
+    activeAbortControllerRef.current = abortController;
+    const signal = abortController.signal;
+    const searchId = activeSearchIdRef.current;
+
     setErrorMessage('');
     setSuccessMessage('');
 
@@ -1068,26 +1151,36 @@ export function SatWebService() {
     const endD = new Date(fEnd);
     const dayDiff = Math.round((endD.getTime() - startD.getTime()) / (1000 * 3600 * 24));
 
-    // If range spans > 35 days (e.g. full year 01/01/2024 to 31/12/2024), use batch multi-month sync
-    if (dayDiff > 35) {
-      const monthPeriods = splitDateRangeIntoMonths(fStart, fEnd);
+    // For any range > 15 days, automatically split period into intervals to strictly respect SAT 2,000 CFDI limits
+    const shouldSplit = dayDiff > 15;
+
+    if (shouldSplit) {
+      const intervals = splitDateRangeIntoIntervals(fStart, fEnd);
       let allFacturas: any[] = [];
       let allXmls: any[] = [];
+      const seenUuids = new Set<string>();
+      const seenXmlFiles = new Set<string>();
       let lastSolicitudId = '';
+
+      if (searchId !== activeSearchIdRef.current || signal.aborted) return;
 
       setBatchSyncInfo({
         active: true,
-        currentLabel: monthPeriods[0].label,
+        currentLabel: intervals[0]?.label || '',
         completedMonths: 0,
-        totalMonths: monthPeriods.length,
+        totalMonths: intervals.length,
         accumulatedCount: 0
       });
 
       try {
-        const CONCURRENCY = 1; // Sequential execution to prevent SAT 5005 ("solicitud en proceso") collisions
+        const CONCURRENCY = 1; // Controlled sequential execution to avoid SAT 5005 collisions
         let completedCount = 0;
 
         const fetchPeriod = async (period: { start: string; end: string; label: string }) => {
+          if (searchId !== activeSearchIdRef.current || signal.aborted) {
+            throw new DOMException('The user aborted a request.', 'AbortError');
+          }
+
           const fd = getFormDataWithFiles();
           fd.append('fecha_inicial', `${period.start}T00:00:00`);
           fd.append('fecha_final', `${period.end}T23:59:59`);
@@ -1099,21 +1192,34 @@ export function SatWebService() {
 
           const res = await fetchWithRetry('/api/sat/facfiel', {
             method: 'POST',
-            body: fd
+            body: fd,
+            signal
           });
+
+          if (searchId !== activeSearchIdRef.current || signal.aborted) {
+            throw new DOMException('The user aborted a request.', 'AbortError');
+          }
 
           let currentData = await parseResponseJson(res);
 
-          // Poll up to 8 attempts (~16s) if SAT is processing asynchronously
+          // Poll up to 25 attempts (~50s) per interval until SAT finishes or downloads packages
           let pollAttempts = 0;
           while (
             (!currentData.facturas || currentData.facturas.length === 0) &&
             currentData.idSolicitud &&
             (currentData.estadoSolicitud === 'En Proceso' || currentData.estadoSolicitud === 'Aceptada') &&
-            pollAttempts < 8
+            pollAttempts < 25
           ) {
+            if (searchId !== activeSearchIdRef.current || signal.aborted) {
+              throw new DOMException('The user aborted a request.', 'AbortError');
+            }
+
             pollAttempts++;
             await new Promise(r => setTimeout(r, 2000));
+
+            if (searchId !== activeSearchIdRef.current || signal.aborted) {
+              throw new DOMException('The user aborted a request.', 'AbortError');
+            }
 
             const pollFd = getFormDataWithFiles();
             pollFd.append('requestId', currentData.idSolicitud);
@@ -1124,18 +1230,20 @@ export function SatWebService() {
             pollFd.append('estatusFactura', facturaFilters.estatusFactura);
 
             try {
-              const pollRes = await fetchWithRetry('/api/sat/facfiel', { method: 'POST', body: pollFd });
+              const pollRes = await fetchWithRetry('/api/sat/facfiel', { method: 'POST', body: pollFd, signal });
+              if (searchId !== activeSearchIdRef.current || signal.aborted) break;
               const pollData = await parseResponseJson(pollRes);
               if (pollData) {
                 currentData = pollData;
                 if (currentData.facturas && currentData.facturas.length > 0) {
                   break;
                 }
-                if (currentData.estadoSolicitud === 'Terminada' || currentData.estadoSolicitud === 'Rechazada') {
+                if (currentData.estadoSolicitud === 'Terminada' || currentData.estadoSolicitud === 'Rechazada' || currentData.estadoSolicitud === 'Error') {
                   break;
                 }
               }
-            } catch (err) {
+            } catch (err: any) {
+              if (err?.name === 'AbortError' || signal.aborted) throw err;
               console.warn(`[SAT Poll Error] Intento ${pollAttempts} fallido para periodo ${period.label}:`, err);
             }
           }
@@ -1143,24 +1251,29 @@ export function SatWebService() {
           return currentData;
         };
 
-        for (let i = 0; i < monthPeriods.length; i += CONCURRENCY) {
-          const chunk = monthPeriods.slice(i, i + CONCURRENCY);
+        for (let i = 0; i < intervals.length; i += CONCURRENCY) {
+          if (searchId !== activeSearchIdRef.current || signal.aborted) break;
+
+          const chunk = intervals.slice(i, i + CONCURRENCY);
           const currentLabels = chunk.map(p => p.label).join(', ');
 
           setBatchSyncInfo({
             active: true,
             currentLabel: currentLabels,
             completedMonths: completedCount,
-            totalMonths: monthPeriods.length,
+            totalMonths: intervals.length,
             accumulatedCount: allFacturas.length
           });
 
           const results = await Promise.all(
             chunk.map(p => fetchPeriod(p).catch(err => {
+              if (err?.name === 'AbortError' || signal.aborted) throw err;
               console.warn('Error en periodo:', p.label, err);
               return { error: formatFetchError(err) };
             }))
           );
+
+          if (searchId !== activeSearchIdRef.current || signal.aborted) break;
 
           for (const data of results) {
             if (data?.error) {
@@ -1182,60 +1295,91 @@ export function SatWebService() {
               registerSolicitudInHistory(data.idSolicitud, data.estadoSolicitud || 'Aceptada', data.facturas?.length);
             }
 
+            // Deduplicate UUIDs
             if (data?.facturas && data.facturas.length > 0) {
-              allFacturas.push(...data.facturas);
-              if (data.xmlFiles) allXmls.push(...data.xmlFiles);
+              for (const item of data.facturas) {
+                const uuid = (item.uuid || item.folio || '').toString().trim().toUpperCase();
+                if (uuid && uuid.length >= 10) {
+                  if (!seenUuids.has(uuid)) {
+                    seenUuids.add(uuid);
+                    allFacturas.push(item);
+                  }
+                } else {
+                  allFacturas.push(item);
+                }
+              }
+            }
+
+            if (data?.xmlFiles && data.xmlFiles.length > 0) {
+              for (const xmlFile of data.xmlFiles) {
+                const key = xmlFile.fileName || xmlFile.content.substring(0, 100);
+                if (!seenXmlFiles.has(key)) {
+                  seenXmlFiles.add(key);
+                  allXmls.push(xmlFile);
+                }
+              }
             }
           }
 
           completedCount += chunk.length;
 
-          // Stream invoices live into UI table so user sees results immediately
+          if (searchId !== activeSearchIdRef.current || signal.aborted) break;
+
+          // Stream live results to UI table
           setFacturasResult({
             idSolicitud: lastSolicitudId || 'BATCH_ANUAL',
             estadoSolicitud: 'Terminada',
             facturas: [...allFacturas],
             comprobantes: [...allFacturas],
             xmlFiles: [...allXmls],
-            mensaje: `Procesando periodo... (${completedCount}/${monthPeriods.length} meses sincronizados - ${allFacturas.length} comprobantes encontrados)`
+            mensaje: `Procesando periodo... (${completedCount}/${intervals.length} intervalos sincronizados - ${allFacturas.length} comprobantes únicos encontrados)`
           });
 
           setBatchSyncInfo({
             active: true,
             currentLabel: currentLabels,
-            completedMonths: Math.min(completedCount, monthPeriods.length),
-            totalMonths: monthPeriods.length,
+            completedMonths: Math.min(completedCount, intervals.length),
+            totalMonths: intervals.length,
             accumulatedCount: allFacturas.length
           });
 
-          // Small 600ms delay between sequential month requests to respect SAT rate limits
-          if (i + CONCURRENCY < monthPeriods.length) {
-            await new Promise(r => setTimeout(r, 600));
+          if (i + CONCURRENCY < intervals.length) {
+            await new Promise(r => setTimeout(r, 400));
           }
         }
 
-        setFacturasResult({
-          idSolicitud: lastSolicitudId || 'BATCH_ANUAL',
-          estadoSolicitud: 'Terminada',
-          facturas: allFacturas,
-          comprobantes: allFacturas,
-          xmlFiles: allXmls,
-          mensaje: `Sincronización del periodo (${fStart} a ${fEnd}) completada. Se obtuvieron ${allFacturas.length} comprobantes en ${monthPeriods.length} sub-periodos.`
-        });
+        if (searchId === activeSearchIdRef.current && !signal.aborted) {
+          setFacturasResult({
+            idSolicitud: lastSolicitudId || 'BATCH_ANUAL',
+            estadoSolicitud: 'Terminada',
+            facturas: allFacturas,
+            comprobantes: allFacturas,
+            xmlFiles: allXmls,
+            mensaje: `Sincronización del periodo (${fStart} a ${fEnd}) completada. Se obtuvieron ${allFacturas.length} comprobantes en ${intervals.length} intervalos.`
+          });
 
-        setSuccessMessage(`¡Sincronización del periodo (${fStart} a ${fEnd}) completada con éxito! Se obtuvieron ${allFacturas.length} comprobantes fiscales.`);
+          setSuccessMessage(`¡Sincronización del periodo (${fStart} a ${fEnd}) completada con éxito! Se obtuvieron ${allFacturas.length} comprobantes fiscales sin duplicados.`);
+        }
       } catch (err: any) {
+        if (err?.name === 'AbortError' || signal.aborted) {
+          console.log('[SatWebService] Búsqueda previa abortada por el usuario o por nueva consulta.');
+          return;
+        }
         console.error(err);
-        setErrorMessage(formatFetchError(err));
+        if (searchId === activeSearchIdRef.current) {
+          setErrorMessage(formatFetchError(err));
+        }
       } finally {
-        setBatchSyncInfo(null);
-        setIsConsultingFacturas(false);
+        if (searchId === activeSearchIdRef.current) {
+          setBatchSyncInfo(null);
+          setIsConsultingFacturas(false);
+        }
       }
 
       return;
     }
 
-    // Standard single range query (<= 35 days)
+    // Standard single range query (<= 15 days)
     try {
       const fd = getFormDataWithFiles();
       fd.append('fecha_inicial', `${fStart}T00:00:00`);
@@ -1248,10 +1392,15 @@ export function SatWebService() {
 
       const res = await fetchWithRetry('/api/sat/facfiel', {
         method: 'POST',
-        body: fd
+        body: fd,
+        signal
       });
 
+      if (searchId !== activeSearchIdRef.current || signal.aborted) return;
+
       const data = await parseResponseJson(res);
+      if (searchId !== activeSearchIdRef.current || signal.aborted) return;
+
       setFacturasResult(data);
 
       if (data.idSolicitud) {
@@ -1269,10 +1418,18 @@ export function SatWebService() {
         setSuccessMessage('¡Consulta finalizada exitosamente!');
       }
     } catch (err: any) {
+      if (err?.name === 'AbortError' || signal.aborted) {
+        console.log('[SatWebService] Búsqueda previa abortada por el usuario o por nueva consulta.');
+        return;
+      }
       console.error(err);
-      setErrorMessage(formatFetchError(err));
+      if (searchId === activeSearchIdRef.current) {
+        setErrorMessage(formatFetchError(err));
+      }
     } finally {
-      setIsConsultingFacturas(false);
+      if (searchId === activeSearchIdRef.current) {
+        setIsConsultingFacturas(false);
+      }
     }
   };
 
@@ -1302,7 +1459,11 @@ export function SatWebService() {
     if (!syncMetrics.active || syncMetrics.nextPollCountdown > 0) return;
     if (isPollingInFlightRef.current) return;
 
+    const currentSearchId = activeSearchIdRef.current;
+    const signal = activeAbortControllerRef.current?.signal;
+
     const executeAdaptivePoll = async () => {
+      if (currentSearchId !== activeSearchIdRef.current || signal?.aborted) return;
       isPollingInFlightRef.current = true;
       const currentId = syncMetrics.idSolicitud;
 
@@ -1316,8 +1477,12 @@ export function SatWebService() {
         fd.append('estatusFactura', facturaFilters.estatusFactura);
 
         const pollStartTime = Date.now();
-        const res = await fetchWithRetry('/api/sat/facfiel', { method: 'POST', body: fd });
+        const res = await fetchWithRetry('/api/sat/facfiel', { method: 'POST', body: fd, signal });
+        if (currentSearchId !== activeSearchIdRef.current || signal?.aborted) return;
+
         const data = await parseResponseJson(res);
+        if (currentSearchId !== activeSearchIdRef.current || signal?.aborted) return;
+
         const pollDurationSec = Math.max(1, (Date.now() - pollStartTime) / 1000);
 
         const xmlCount = data?.facturas?.length || 0;
@@ -1325,7 +1490,7 @@ export function SatWebService() {
         const speed = xmlCount > 0 ? Math.round(xmlCount / pollDurationSec) : 0;
         const estadoText = data?.estadoSolicitud || 'En Proceso';
 
-        if (data) {
+        if (data && currentSearchId === activeSearchIdRef.current) {
           setFacturasResult(data);
         }
 
@@ -1354,10 +1519,6 @@ export function SatWebService() {
           setErrorMessage(data?.mensaje || `Solicitud ${estadoText} por el SAT.`);
           setAutoPollActive(false);
         } else {
-          // Compute adaptive interval:
-          // Minute 1: 2s base interval.
-          // Minute 1-3: 4s to 8s interval.
-          // > 3m: 10s to 12s interval.
           const elapsed = syncMetrics.elapsedSeconds;
           let baseInterval = 2;
           if (elapsed > 180) {
@@ -1373,27 +1534,32 @@ export function SatWebService() {
           const jitter = Math.random() * 0.8;
           const nextInterval = Math.round((baseInterval + jitter) * 10) / 10;
 
-          setSyncMetrics(prev => ({
-            ...prev,
-            estado: estadoText,
-            pollAttempts: prev.pollAttempts + 1,
-            packagesFound: pkgCount,
-            nextPollCountdown: Math.round(nextInterval),
-            currentIntervalSeconds: Math.round(nextInterval),
-            lastPollTime: new Date().toLocaleTimeString('es-MX'),
-            message: `Estatus SAT: ${estadoText}. Próxima verificación adaptativa en ${Math.round(nextInterval)}s...`
-          }));
+          if (currentSearchId === activeSearchIdRef.current) {
+            setSyncMetrics(prev => ({
+              ...prev,
+              estado: estadoText,
+              pollAttempts: prev.pollAttempts + 1,
+              packagesFound: pkgCount,
+              nextPollCountdown: Math.round(nextInterval),
+              currentIntervalSeconds: Math.round(nextInterval),
+              lastPollTime: new Date().toLocaleTimeString('es-MX'),
+              message: `Estatus SAT: ${estadoText}. Próxima verificación adaptativa en ${Math.round(nextInterval)}s...`
+            }));
+          }
         }
       } catch (err: any) {
+        if (err?.name === 'AbortError' || signal?.aborted) return;
         console.warn('[Adaptive Poll Warning]:', err);
-        const elapsed = syncMetrics.elapsedSeconds;
-        const retryInterval = elapsed > 60 ? 6 : 3;
-        setSyncMetrics(prev => ({
-          ...prev,
-          nextPollCountdown: retryInterval,
-          currentIntervalSeconds: retryInterval,
-          message: 'Reintentando verificación adaptativa...'
-        }));
+        if (currentSearchId === activeSearchIdRef.current) {
+          const elapsed = syncMetrics.elapsedSeconds;
+          const retryInterval = elapsed > 60 ? 6 : 3;
+          setSyncMetrics(prev => ({
+            ...prev,
+            nextPollCountdown: retryInterval,
+            currentIntervalSeconds: retryInterval,
+            message: 'Reintentando verificación adaptativa...'
+          }));
+        }
       } finally {
         isPollingInFlightRef.current = false;
       }
